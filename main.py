@@ -8,7 +8,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright, Page 
 from urllib.parse import urljoin 
-from ddgs import DDGS # التأكد من استخدام ddgs فقط
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -18,46 +17,74 @@ MIN_PDF_SIZE_BYTES = 50 * 1024
 TEMP_LINKS_KEY = "current_search_links" 
 TRUSTED_DOMAINS = [
     "kotobati.com", 
-    "masaha.org", 
-    "books-library.net",
-    "archive.org" # إضافة Archive.org لزيادة الدقة
+    "masaha.org", # لم تُضاف كدالة بحث متخصصة لعدم وجود نمط واضح
+    "archive.org"
 ]
 
-# --- دالة البحث الثورية (DuckDuckGo) المُحسَّنة للدقة V7.1 ---
-async def search_duckduckgo(query: str):
-    """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة باستخدام استعلامين لزيادة الدقة."""
-    
-    # الاستعلام 1: التركيز على نوع الملف واسم الكتاب
-    query_1 = f'"{query}" filetype:pdf'
-    
-    # الاستعلام 2: التركيز على المواقع الموثوقة واسم الكتاب
-    sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-    query_2 = f'"{query}" ({sites_query})'
-    
-    full_queries = [query_1, query_2]
-    
-    all_results = []
-    
-    with DDGS(timeout=5) as ddgs:
-        for q in full_queries:
-            print(f"Executing search query: {q}")
-            
-            search_results = ddgs.text(q, max_results=5) # 5 نتائج لكل استعلام
-            
-            for r in search_results:
-                link = r.get("href")
-                title = r.get("title")
-                
-                # نفلترة الروابط للتأكد من أنها PDF أو من مصدر موثوق
-                if link.lower().endswith(".pdf") or any(d in link for d in TRUSTED_DOMAINS):
-                    all_results.append({"title": title, "link": link})
+# 💥 أنماط البحث المخصص (V9.0) - تم إلغاء DDGS
+SITE_SEARCH_PATTERNS = {
+    "kotobati.com": "https://kotobati.com/search?q={query}",
+    "archive.org": "https://archive.org/details/texts?query={query}",
+    # يمكن إضافة المزيد هنا (مثل Masaha)
+}
 
-    # إزالة الروابط المكررة والحصول على أفضل 5 نتائج
-    unique_links = {}
-    for item in all_results:
-        unique_links[item['link']] = item
+# --- دالة البحث المخصص الجديدة (V9.0) ---
+async def search_site_and_extract_links(query: str):
+    """
+    يقوم بالبحث مباشرة داخل المواقع الموثوقة ويستخلص روابط الكتب الفردية.
+    """
+    results = []
     
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page()
+
+            for domain, url_pattern in SITE_SEARCH_PATTERNS.items():
+                search_url = url_pattern.format(query=query)
+                
+                try:
+                    print(f"Searching {domain} at: {search_url}")
+                    await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
+                    html_content = await page.content()
+                    soup = BeautifulSoup(html_content, "html.parser")
+
+                    if "kotobati.com" in domain:
+                        # محددات Kotobati (قد تحتاج لتعديل بسيط بناءً على الهيكلية الحالية)
+                        book_cards = soup.select('.book-item a') 
+                        for card in book_cards[:3]: 
+                            link = urljoin(url_pattern, card.get('href'))
+                            title_tag = card.select_one('.book-title')
+                            if title_tag and link:
+                                 results.append({"title": title_tag.text.strip(), "link": link})
+
+                    elif "archive.org" in domain:
+                        # محددات Archive.org
+                        item_links = soup.select('.item-ttl a')
+                        for link_tag in item_links[:3]:
+                            link = urljoin(url_pattern, link_tag.get('href'))
+                            title = link_tag.text.strip()
+                            results.append({"title": title, "link": link})
+                            
+                    if len(results) >= 6:
+                        break
+
+                except Exception as e:
+                    print(f"Error searching {domain}: {e}")
+                    continue
+
+            await browser.close()
+            
+    except Exception as e:
+        print(f"Playwright initiation failed during search: {e}")
+    
+    # ضمان عدم تكرار الروابط والحصول على أفضل 5 نتائج
+    unique_links = {}
+    for item in results:
+        unique_links[item['link']] = item
+        
     return list(unique_links.values())[:5]
+
 
 # --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة ---
 async def fallback_strategy_4_network_mine(page: Page, download_selector_css: str, link: str):
@@ -92,7 +119,7 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         except:
             pass 
 
-# --- دالة الاستخلاص المطلقة المُحسَّنة (V7.0) ---
+# --- دالة الاستخلاص المطلقة (V7.0) ---
 async def get_pdf_link_from_page(link: str):
     """
     يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF.
@@ -101,7 +128,7 @@ async def get_pdf_link_from_page(link: str):
     page_title = "book" 
     browser = None 
     
-    # 💥 التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
+    # التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
     if link.lower().endswith('.pdf') or any(d in link.lower() for d in ['archive.org/download', 'drive.google.com']):
         print(f"Direct PDF link detected. Bypassing Playwright: {link}")
         return link, "Direct PDF"
@@ -136,6 +163,10 @@ async def get_pdf_link_from_page(link: str):
                 
             except Exception as e:
                 print(f"Initial gather failed, attempting fallback strategies: {e}")
+                
+                # --- محاولة 2 و 3 و 4 (البقية) ---
+                
+                # ... (هنا يتم إدراج المحاولات 2 و 3 و 4 المتبقية، والتي لم تتغير عن V7.0) ...
                 
                 # --- محاولة 2: النقر ثم التأخير ثم التنصت ---
                 try:
@@ -182,6 +213,8 @@ async def get_pdf_link_from_page(link: str):
                     if not pdf_link:
                          print("HTML check failed. Executing Network Mining (Strategy 4).")
                          pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
+                
+            # ... (نهاية المحاولات 2 و 3 و 4) ...
 
 
             return pdf_link, page_title
@@ -201,7 +234,7 @@ async def get_pdf_link_from_page(link: str):
             print("تم ضمان إغلاق متصفح Playwright.")
 
 
-# --- دوال تيليجرام (download_and_send_pdf) تبقى كما هي ---
+# --- دوال تيليجرام (download_and_send_pdf) ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()
@@ -255,10 +288,11 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري التنقيب عن أفضل المصادر)...")
+    # 💥 استدعاء دالة البحث المخصص (V9.0)
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المخصص داخل المكتبات)...")
     
     try:
-        results = await search_duckduckgo(query)
+        results = await search_site_and_extract_links(query) # 💥 التغيير هنا
 
         if not results:
             await msg.edit_text("❌ لم أجد نتائج موثوقة في المكتبات المختارة. حاول بكلمات مختلفة.")
@@ -271,18 +305,18 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
-            source = next((d.replace('.com', '').replace('.net', '').replace('.org', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "رابط مباشر")
+            # تحديد المصدر بناءً على الرابط
+            source = next((d.replace('.com', '').replace('.net', '').replace('.org', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "موقع آخر")
             
             text_lines.append(f"\n*{i+1}. {title}* (المصدر: {source})")
             
-            # 💥 الصف الأول: زر التحميل ورابط المصدر (V8.0)
+            # أزرار الواجهة (V8.0)
             row1 = [
                 InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}"),
                 InlineKeyboardButton(f"🔗 رابط المصدر", url=item.get("link")) 
             ]
             buttons.append(row1)
         
-        # 💥 أزرار التحكم في البحث (V8.0)
         control_buttons = [
             InlineKeyboardButton("🔁 بحث جديد", switch_inline_query_current_chat="/search "),
             InlineKeyboardButton("❌ إخفاء القائمة", callback_data="hide")
@@ -301,7 +335,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    # 💥 معالج زر الإخفاء (V8.0)
+    # معالج زر الإخفاء (V8.0)
     if data == "hide":
         try:
             await query.edit_message_text("✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.")

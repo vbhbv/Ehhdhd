@@ -14,7 +14,8 @@ from ddgs import DDGS
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+# وكيل مستخدم لسطح المكتب (للتحصين ضد الكشف)
+USER_AGENT = 'Mozilla/50 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
 
 MIN_PDF_SIZE_BYTES = 50 * 1024 
@@ -25,9 +26,8 @@ TRUSTED_DOMAINS = [
     "books-library.net"
 ]
 
-# --- دالة البحث (DDGS - V10.2: بدون تغيير) ---
+# --- دالة البحث (DDGS - بدون تغيير) ---
 async def search_duckduckgo(query: str):
-    # ... (منطق البحث بدون تغيير)
     sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
     full_query = f"{query} filetype:pdf OR {sites_query}"
     results = []
@@ -53,7 +53,7 @@ async def search_duckduckgo(query: str):
     return list(unique_links.values())[:5]
 
 # ----------------------------------------------------------------------
-# --- دالة الاستخلاص المطلقة المُحسّنة (V12.1 - الضربة التكتيكية النهائية) ---
+# --- دالة الاستخلاص المطلقة المُحسَّنة (V12.1.2 - الضربة التكتيكية النهائية) ---
 # ----------------------------------------------------------------------
 async def get_pdf_link_from_page(link: str):
     """
@@ -62,6 +62,10 @@ async def get_pdf_link_from_page(link: str):
     pdf_link = None
     page_title = "book" 
     browser = None 
+    
+    # تهيئة المتغيرات لضمان عدم حدوث UnboundLocalError
+    is_local_path = False 
+    network_urls = set() 
     
     if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
         return link, "Direct PDF", False
@@ -123,8 +127,7 @@ async def get_pdf_link_from_page(link: str):
             # --- إذا لم يتم العثور على الرابط، نبدأ دورة النقر والمنصتات ---
             if not pdf_link:
                 
-                # إعداد منصت الشبكة أولاً
-                network_urls = set()
+                # إعداد منصت الشبكة
                 def capture_url(response):
                     if response.status in [200, 206, 301, 302]:
                         network_urls.add(response.url)
@@ -151,12 +154,15 @@ async def get_pdf_link_from_page(link: str):
                 except Exception:
                      # محاولة النقر بـ JavaScript إذا فشل النقر بـ Locator
                      try:
-                        await page.evaluate(f"""
-                            const element = document.querySelector('{download_selector_css.replace("'", "\\'")}');
-                            if (element) {{
-                                element.click();
-                            }}
-                        """)
+                        # 💥 تصحيح V12.1.2: استخدام arg لتمرير المتغير (لمنع خطأ الـ f-string)
+                        await page.evaluate("""
+                            (selector) => {
+                                const element = document.querySelector(selector);
+                                if (element) {
+                                    element.click();
+                                }
+                            }
+                        """, download_selector_css) # تمرير المتغير هنا كـ arg
                         await asyncio.sleep(7) 
                      except Exception:
                          pass
@@ -164,7 +170,6 @@ async def get_pdf_link_from_page(link: str):
                 # --- تقييم النتائج بعد النقر الوحيد ---
                 
                 # 2. تقييم منصت التنزيل (Strategy 6 - Blob/Local Save)
-                is_local_path = False
                 if download_event:
                     await download_event.save_as(temp_file_path)
                     pdf_link = temp_file_path
@@ -178,13 +183,6 @@ async def get_pdf_link_from_page(link: str):
                             pdf_link = url
                             break
                 
-                # 4. تقييم النافذة المنبثقة (Strategy 5 - Popup Listener)
-                if not pdf_link:
-                    # يجب أن نعتمد على حدث النافذة المنبثقة الذي تم التقاطه أثناء النقر (إذا كان قد حدث)
-                    # Playwright لا يسمح بانتظار حدث مضى، لذا نعتمد على استجابة الشبكة هنا بشكل أساسي.
-                    # لو كان الرابط المنبثق هو ملف PDF، لكان قد تم التقاطه بواسطة منصت الشبكة أعلاه!
-                    pass
-
                 # تنظيف المنصتات
                 try:
                     page.remove_listener("response", capture_url)
@@ -270,7 +268,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ حدث خطأ أثناء معالجة زر التحميل (رابط غير صالح).")
             return
             
-        await query.edit_message_text("⏳ تفعيل استراتيجية الاستخلاص الناري (V12.1 - الضربة التكتيكية)...")
+        await query.edit_message_text("⏳ تفعيل استراتيجية الاستخلاص الناري (V12.1.2 - الضربة التكتيكية)...")
         
         try:
             pdf_link, title, is_local_path = await get_pdf_link_from_page(link)

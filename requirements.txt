@@ -1,8 +1,7 @@
-pandas
-numpy
-scikit-learn
-joblib
+# Core Libraries
+python-telegram-bot
+aiohttp
 beautifulsoup4
 playwright
-python-telegram-bot
-httpx
+ddgs
+aiofiles

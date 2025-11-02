@@ -1,7 +1,6 @@
-# Core Libraries
-python-telegram-bot
+python-telegram-bot==20.8
 aiohttp
-beautifulsoup4
-playwright
-ddgs
 aiofiles
+beautifulsoup4
+ddgs
+playwright

@@ -8,7 +8,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright
 from urllib.parse import urljoin 
-from duckduckgo_search import AsyncDDGS 
+# 💥 التعديل الحاسم: استخدام DDGS بدلاً من AsyncDDGS لضمان التوافق
+from duckduckgo_search import DDGS 
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,6 +25,7 @@ TRUSTED_DOMAINS = [
 ]
 
 # --- دالة البحث الثورية (DuckDuckGo) ---
+
 async def search_duckduckgo(query: str):
     """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
     
@@ -37,14 +39,15 @@ async def search_duckduckgo(query: str):
     
     results = []
     
-    # استخدام AsyncDDGS للبحث غير المتزامن
-    async for r in AsyncDDGS(proxies=None, timeout=5).text(full_query, max_results=10):
-        link = r.get("href")
-        title = r.get("title")
-        
-        # التصفية: قبول الروابط التي تنتهي بـ .pdf أو من المواقع الموثوقة
-        if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
-            results.append({"title": title, "link": link})
+    # 💥 التعديل: استخدام DDGS كمدير سياق (Context Manager) لضمان العمل Async
+    with DDGS(proxies=None, timeout=5) as ddgs:
+        async for r in ddgs.text(full_query, max_results=10):
+            link = r.get("href")
+            title = r.get("title")
+            
+            # التصفية: قبول الروابط التي تنتهي بـ .pdf أو من المواقع الموثوقة
+            if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
+                results.append({"title": title, "link": link})
 
     # إزالة التكرارات وضمان 5 نتائج فقط
     unique_links = {}
@@ -127,7 +130,7 @@ async def get_pdf_link_from_page(link: str):
             await browser.close()
             print("تم ضمان إغلاق متصفح Playwright.")
 
-# --- دالة التحميل والإرسال والحذف (مُعاد إدراجها لضمان اكتمال الكود) ---
+# --- دالة التحميل والإرسال والحذف ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()

@@ -20,9 +20,9 @@ USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
 
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
-COOKIES_FILE = "browser_cookies.json" # 💥 V16.0: ملف لحفظ حالة المتصفح
+COOKIES_FILE = "browser_cookies.json" 
 
-# 🎯 V15.3: قائمة المواقع الموسعة للبحث 
+# 🎯 V16.1: قائمة المواقع الموسعة للبحث 
 TRUSTED_DOMAINS = [
     "ketabpedia.com",   
     "scribd.com",       
@@ -81,8 +81,8 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         await page.locator(download_selector_css).click(timeout=10000, force=True) 
         await asyncio.sleep(7) 
         
-        # 💥 V16.0: المراقبة المستمرة لمحتوى الشبكة (15 ثانية إضافية)
-        for i in range(15):
+        # V16.1: المراقبة المستمرة لمحتوى الشبكة
+        for i in range(15): # الانتظار لمدة 15 ثانية إضافية
              await asyncio.sleep(1)
              for url in network_urls:
                 url_lower = url.lower()
@@ -102,19 +102,22 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
             pass 
 
 # ----------------------------------------------------------------------
-# --- دالة الاستخلاص المطلقة المُطوّرة (V16.0 - المقاومة السلوكية والتعويضية) ---
+# --- دالة الاستخلاص المطلقة المُطوّرة (V16.1 - التحصين ضد الفشل المبكر) ---
 # ----------------------------------------------------------------------
 async def get_pdf_link_from_page(link: str):
     pdf_link = None
     page_title = "book" 
     browser = None 
     is_local_path = False
+    navigation_successful = False
     
     if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
-        # 💥 V16.0: إرجاع الرابط الأصلي لاستخدامه كـ Referer (إذا كان رابط مباشر)
         return link, "Direct PDF", False, link 
         
     try:
+        # V16.1: تأخير بسيط للسماح بتهيئة موارد الخادم
+        await asyncio.sleep(3) 
+
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless="new", 
@@ -127,7 +130,7 @@ async def get_pdf_link_from_page(link: str):
                 ]
             )
             
-            # 💥 V16.0: تحميل حالة المتصفح (ملفات تعريف الارتباط/التخزين المؤقت)
+            # V16.0: تحميل حالة المتصفح (ملفات تعريف الارتباط/التخزين المؤقت)
             storage_state_kwargs = {}
             if os.path.exists(COOKIES_FILE):
                 storage_state_kwargs['storage_state'] = COOKIES_FILE
@@ -136,12 +139,12 @@ async def get_pdf_link_from_page(link: str):
                 viewport={'width': 1920, 'height': 1080}, 
                 user_agent=USER_AGENT,
                 locale='ar-EG', 
-                **storage_state_kwargs # دمج حالة التخزين
+                **storage_state_kwargs 
             )
             
-            # 🛡️ الإخفاء الهندسي المتقدم (Anti-Detection Script) - بدون تغيير
+            # 🛡️ الإخفاء الهندسي المتقدم (Anti-Detection Script)
             await context.add_init_script("""
-                // V16.0: إخفاء خصائص متقدمة
+                // V16.1: إخفاء خصائص متقدمة
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 });
@@ -163,113 +166,127 @@ async def get_pdf_link_from_page(link: str):
             
             page = await context.new_page()
 
-            await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
-            
-            # الابتكار السلوكي: التمرير والتأخير العشوائي 
+            # 💥 V16.1: عزل عملية التنقل (page.goto) لعدم إفشال الدالة بأكملها
             try:
-                await page.mouse.wheel(0, random.randint(300, 800)) 
-                await asyncio.sleep(random.uniform(1.5, 3))         
-                await page.mouse.wheel(0, -random.randint(200, 500)) 
-                await asyncio.sleep(random.uniform(1, 2.5))
-            except Exception:
-                 pass
-            
-            html_content = await page.content()
-            soup = BeautifulSoup(html_content, "html.parser")
-            page_title = soup.title.string if soup.title else "book"
-            download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
-            
-            # --- الإستراتيجية (5. النقر القسري عبر الإحداثيات) ---
-            async def coordinate_click(selector: str):
-                try:
-                    element = await page.locator(selector).bounding_box(timeout=5000)
-                    if element:
-                        x = element['x'] + element['width'] / 2
-                        y = element['y'] + element['height'] / 2
-                        
-                        # محاولة النقر العشوائي لإغلاق الإعلانات
-                        await page.locator('button[aria-label="close"], a.close-btn').click(timeout=1000, force=True) 
-                        await asyncio.sleep(0.5)
-                        
-                        # النقر على الإحداثيات مباشرة
-                        await page.mouse.click(x, y)
-                        return True
-                except Exception:
-                    return False
-                return False
-
-            # --- محاولات الاستخلاص (دمج استراتيجيات النقر) ---
-            
-            # 1. التزامن (gather) (Strategy 1)
-            try:
-                pdf_response, _ = await asyncio.gather(
-                    page.wait_for_response(
-                        lambda response: response.status in [200, 206, 301, 302] and (
-                            'application/pdf' in response.headers.get('content-type', '') or 
-                            response.url.lower().endswith('.pdf')
-                        ),
-                        timeout=30000
-                    ),
-                    coordinate_click(download_selector_css) # استخدام النقر بالإحداثيات
-                )
-                pdf_link = pdf_response.url
-            except Exception:
-                pass
+                await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
+                navigation_successful = True
+            except Exception as nav_e:
+                print(f"Navigation failed: {nav_e}")
                 
-            if not pdf_link:
-                # 2. التنقيب الشبكي العميق (Strategy 4)
-                pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
             
-            # 3. مُنصت التنزيل القسري مع حفظ Playwright (Strategy 6)
-            if not pdf_link:
-                download_event = None
-                temp_dir = tempfile.gettempdir()
-                temp_file_name = f"temp_{os.getpid()}_{random.randint(100, 999)}.pdf"
-                temp_file_path = os.path.join(temp_dir, temp_file_name)
-
-                def capture_download(download):
-                    nonlocal download_event
-                    download_event = download
-
-                page.on('download', capture_download)
-
+            if navigation_successful:
+                
+                # الابتكار السلوكي: التمرير والتأخير العشوائي 
                 try:
-                    await coordinate_click(download_selector_css)
-                    await asyncio.sleep(5) 
-                    
-                    if download_event:
-                        await download_event.save_as(temp_file_path)
-                        pdf_link = temp_file_path
-                        is_local_path = True
-                        
-                except Exception as e:
-                    pdf_link = None 
-
-                finally:
+                    await page.mouse.wheel(0, random.randint(300, 800)) 
+                    await asyncio.sleep(random.uniform(1.5, 3))         
+                    await page.mouse.wheel(0, -random.randint(200, 500)) 
+                    await asyncio.sleep(random.uniform(1, 2.5))
+                except Exception:
+                    pass
+                
+                html_content = await page.content()
+                soup = BeautifulSoup(html_content, "html.parser")
+                page_title = soup.title.string if soup.title else "book"
+                download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
+                
+                # --- الإستراتيجية (5. النقر القسري عبر الإحداثيات) ---
+                async def coordinate_click(selector: str):
                     try:
-                        page.remove_listener('download', capture_download)
-                    except:
-                        pass
-            
-            # 4. فحص HTML النهائي (Strategy 3)
-            if not pdf_link:
-                await asyncio.sleep(5) 
-                final_html_content = await page.content()
-                final_soup = BeautifulSoup(final_html_content, "html.parser")
-                for a_tag in final_soup.find_all('a', href=True):
-                    href = urljoin(link, a_tag['href'])
-                    href_lower = href.lower()
-                    if href_lower.endswith('.pdf') or 'download' in href_lower:
-                        pdf_link = href
-                        break
+                        element = await page.locator(selector).bounding_box(timeout=5000)
+                        if element:
+                            x = element['x'] + element['width'] / 2
+                            y = element['y'] + element['height'] / 2
+                            
+                            # محاولة النقر العشوائي لإغلاق الإعلانات
+                            await page.locator('button[aria-label="close"], a.close-btn').click(timeout=1000, force=True) 
+                            await asyncio.sleep(0.5)
+                            
+                            # النقر على الإحداثيات مباشرة
+                            await page.mouse.click(x, y)
+                            return True
+                    except Exception:
+                        return False
+                    return False
 
-            # 💥 V16.0: حفظ حالة المتصفح (ملفات تعريف الارتباط) للعمليات المستقبلية
-            await context.storage_state(path=COOKIES_FILE)
-            
-            return pdf_link, page_title, is_local_path, link # 💥 V16.0: إرجاع الرابط الأصلي
+                # 1. التزامن (gather) (Strategy 1)
+                try:
+                    pdf_response, _ = await asyncio.gather(
+                        page.wait_for_response(
+                            lambda response: response.status in [200, 206, 301, 302] and (
+                                'application/pdf' in response.headers.get('content-type', '') or 
+                                response.url.lower().endswith('.pdf')
+                            ),
+                            timeout=30000
+                        ),
+                        coordinate_click(download_selector_css) 
+                    )
+                    pdf_link = pdf_response.url
+                except Exception:
+                    pass
+                    
+                if not pdf_link:
+                    # 2. التنقيب الشبكي العميق (Strategy 4) - هنا يتم انتظار 22 ثانية
+                    pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
+                
+                # 3. مُنصت التنزيل القسري مع حفظ Playwright (Strategy 6)
+                if not pdf_link:
+                    download_event = None
+                    temp_dir = tempfile.gettempdir()
+                    temp_file_name = f"temp_{os.getpid()}_{random.randint(100, 999)}.pdf"
+                    temp_file_path = os.path.join(temp_dir, temp_file_name)
 
+                    def capture_download(download):
+                        nonlocal download_event
+                        download_event = download
+
+                    page.on('download', capture_download)
+
+                    try:
+                        await coordinate_click(download_selector_css)
+                        await asyncio.sleep(5) 
+                        
+                        if download_event:
+                            await download_event.save_as(temp_file_path)
+                            pdf_link = temp_file_path
+                            is_local_path = True
+                            
+                    except Exception as e:
+                        pdf_link = None 
+
+                    finally:
+                        try:
+                            page.remove_listener('download', capture_download)
+                        except:
+                            pass
+                
+                # 4. فحص HTML النهائي (Strategy 3)
+                if not pdf_link:
+                    await asyncio.sleep(5) 
+                    final_html_content = await page.content()
+                    final_soup = BeautifulSoup(final_html_content, "html.parser")
+                    for a_tag in final_soup.find_all('a', href=True):
+                        href = urljoin(link, a_tag['href'])
+                        href_lower = href.lower()
+                        if href_lower.endswith('.pdf') or 'download' in href_lower:
+                            pdf_link = href
+                            break
+                            
+                # التأكد من العنوان النهائي
+                if not page_title:
+                    html_content = await page.content()
+                    soup = BeautifulSoup(html_content, "html.parser")
+                    page_title = soup.title.string if soup.title else "book"
+
+                # V16.0: حفظ حالة المتصفح (ملفات تعريف الارتباط) للعمليات المستقبلية
+                await context.storage_state(path=COOKIES_FILE)
+            
+            # 💥 V16.1: إذا فشل التنقل، pdf_link سيكون None، وستعيده الدالة
+            return pdf_link, page_title, is_local_path, link
     
     except Exception as e:
+        # إذا حدث خطأ في إعداد المتصفح نفسه، سنعود بـ None
+        print(f"Critical error during setup: {e}")
         return None, "book", False, link
     
     finally:
@@ -280,7 +297,6 @@ async def get_pdf_link_from_page(link: str):
 # ----------------------------------------------------------------------
 # --- دالة التحميل والإرسال (V16.0 - تمرير Referer Header) ---
 # ----------------------------------------------------------------------
-# 💥 V16.0: استقبال الرابط الأصلي (referer_link)
 async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_local_path=False, referer_link=None):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     
@@ -289,7 +305,7 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_l
     else:
         pdf_url = source
         
-        # 💥 V16.0: دمج Referer Header 
+        # V16.0: دمج Referer Header 
         download_headers = USER_AGENT_HEADER.copy()
         if referer_link:
             download_headers['Referer'] = referer_link
@@ -356,14 +372,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ حدث خطأ أثناء معالجة زر التحميل (رابط غير صالح).")
             return
             
-        await query.edit_message_text("⏳ تفعيل استراتيجية المقاومة المطلقة (V16.0 - النقر القسري والتعويضي)...")
+        await query.edit_message_text("⏳ تفعيل استراتيجية المقاومة المطلقة (V16.1 - التحصين ضد الفشل المبكر)...")
         
         try:
-            # 💥 V16.0: استقبال الرابط الأصلي (referer_link)
+            # استقبال الرابط الأصلي (referer_link)
             pdf_link, title, is_local_path, referer_link = await get_pdf_link_from_page(link)
             
             if pdf_link:
-                # 💥 V16.0: تمرير Referer Link
+                # تمرير Referer Link
                 await download_and_send_pdf(context, query.message.chat_id, pdf_link, title=title if title else "book", is_local_path=is_local_path, referer_link=referer_link)
             else:
                 await context.bot.send_message(chat_id=query.message.chat_id, text=f"📄 فشل الاستخلاص الشامل. رابط المصدر: {link}")
@@ -371,7 +387,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await context.bot.send_message(chat_id=query.message.chat_id, text=f"⚠️ خطأ Playwright أثناء جلب الملف: {e}")
 
-# --- باقي دوال تيليجرام (start، search_cmd، main) - بدون تغيير جوهري في المنطق ---
+# --- باقي دوال تيليجرام (start، search_cmd، main) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(

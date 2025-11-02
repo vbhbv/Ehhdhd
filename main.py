@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright, Page 
 from urllib.parse import urljoin 
-from ddgs import DDGS 
+from ddgs import DDGS # التأكد من استخدام ddgs فقط
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -34,6 +34,7 @@ async def search_duckduckgo(query: str):
     
     results = []
     
+    # التأكد من استخدام DDGS بالشكل الصحيح
     with DDGS(timeout=5) as ddgs:
         search_results = ddgs.text(full_query, max_results=10)
         
@@ -56,24 +57,18 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
     network_urls = set()
 
     def capture_url(response):
-        # نهتم بالتحويلات والاستجابات الناجحة
         if response.status in [200, 206, 301, 302]:
             network_urls.add(response.url)
             
-    # تفعيل التنصت على استجابات الشبكة
     page.on("response", capture_url)
     
     try:
-        # ننقر مرة أخرى لضمان تفعيل المسار
         await page.locator(download_selector_css).click(timeout=15000) 
-        
-        # ننتظر لفترة كافية لتحميل كل التحويلات
         await asyncio.sleep(7) 
         
-        # البحث في الروابط التي تم التقاطها
         for url in network_urls:
             url_lower = url.lower()
-            if url_lower.endswith('.pdf') or 'drive.google.com' in url_lower or 'dropbox.com' in url_lower:
+            if url_lower.endswith('.pdf') or 'drive.google.com' in url_lower or 'dropbox.com' in url_lower or 'archive.org/download' in url_lower:
                 print(f"PDF link found via Network Mining: {url}")
                 return url
         
@@ -84,26 +79,27 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         return None
         
     finally:
-        # التعديل الحاسم: محاولة إزالة المنصت مباشرة
         try:
             page.remove_listener("response", capture_url)
-        except Exception as remove_error:
-            # تجاهل الخطأ في حال لم يكن المنصت مثبتاً (لتجنب crash)
+        except:
             pass 
 
-# --- دالة الاستخلاص المطلقة المُحسَّنة (V6.1) ---
+# --- دالة الاستخلاص المطلقة المُحسَّنة (V7.0) ---
 async def get_pdf_link_from_page(link: str):
     """
-    يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF
-    بإستراتيجيات متعددة (التزامن، التنقيب، فحص HTML).
+    يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF.
     """
     pdf_link = None
     page_title = "book" 
     browser = None 
     
+    # 💥 التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
+    if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
+        print(f"Direct PDF link detected. Bypassing Playwright: {link}")
+        return link, "Direct PDF"
+        
     try:
         async with async_playwright() as p:
-            # يجب أن يكون Chromium مُثبتاً في بيئة التشغيل
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
@@ -113,12 +109,10 @@ async def get_pdf_link_from_page(link: str):
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # 1. تحديد CSS Selector الشامل
             download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
             
             # --- محاولة 1: التزامن (gather) ---
             try:
-                # توسيع الشرط ليشمل 301/302 أو انتهاء الرابط بـ .pdf
                 pdf_response, _ = await asyncio.gather(
                     page.wait_for_response(
                         lambda response: response.status in [200, 206, 301, 302] and (
@@ -127,7 +121,6 @@ async def get_pdf_link_from_page(link: str):
                         ),
                         timeout=30000
                     ),
-                    # نستخدم النقر المباشر على CSS selector
                     page.click(download_selector_css, timeout=25000) 
                 )
                 
@@ -172,7 +165,7 @@ async def get_pdf_link_from_page(link: str):
                             href = urljoin(link, a_tag['href'])
                             href_lower = href.lower()
 
-                            if 'download' in href_lower or 'drive.google.com' in href_lower or 'dropbox.com' in href_lower:
+                            if 'download' in href_lower or 'drive.google.com' in href_lower or 'dropbox.com' in href_lower or 'archive.org/download' in href_lower:
                                 pdf_link = href
                                 print(f"General download link found in HTML (Strategy 3): {pdf_link}")
                                 break

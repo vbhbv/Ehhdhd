@@ -1,69 +1,80 @@
 import os
-import requests
 import asyncio
+import aiohttp
+import aiofiles
+from bs4 import BeautifulSoup
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ========= إعدادات البوت =========
+# ===== إعدادات البوت =====
 BOT_TOKEN = "7176379503:AAFdo257wapb4wJntAk_axaoGBuFdQP617w"
 GOOGLE_API_KEY = "AIzaSyCll0HI8NCDut4I4xBBabQ9bRX2SPFTbDk"
 SEARCH_ENGINE_ID = "b210b5e71b2aa4918"
-# =================================
+# =========================
 
-# دالة البحث في جوجل عن ملفات PDF من موقع مكتبة النور أو كتوباتي
-def search_books(query):
-    try:
-        q = f"site:ktobati.com OR site:alnoor.se filetype:pdf {query}"
-        url = f"https://www.googleapis.com/customsearch/v1?q={q}&key={GOOGLE_API_KEY}&cx={SEARCH_ENGINE_ID}"
-        response = requests.get(url)
-        results = response.json()
-
-        if "items" not in results:
-            return None
-
-        links = []
-        for item in results["items"]:
-            link = item.get("link", "")
-            if link.endswith(".pdf"):
-                links.append(link)
-        return links if links else None
-    except Exception as e:
-        print("Search error:", e)
-        return None
+# البحث في Google عبر API
+async def google_search(query):
+    url = (
+        f"https://www.googleapis.com/customsearch/v1"
+        f"?q=site:alnoor.se OR site:ktobati.com filetype:pdf {query}"
+        f"&key={GOOGLE_API_KEY}&cx={SEARCH_ENGINE_ID}"
+    )
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            data = await response.json()
+            items = data.get("items", [])
+            results = []
+            for item in items:
+                link = item.get("link", "")
+                if link.endswith(".pdf"):
+                    results.append(link)
+            return results
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 مرحباً بك! أرسل اسم الكتاب أو المؤلف للبحث عن ملف PDF.\nمثلاً:\n/search ابن سينا")
+    await update.message.reply_text(
+        "📚 مرحباً! أرسل اسم الكتاب أو المؤلف لأبحث لك عن ملف PDF.\n"
+        "مثلاً:\n/search ابن سينا"
+    )
 
 
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) == 0:
-        await update.message.reply_text("❗استخدم الأمر بالشكل التالي:\n/search اسم الكتاب أو المؤلف")
+    if not context.args:
+        await update.message.reply_text("❗ استخدم الأمر بالشكل التالي:\n/search اسم الكتاب")
         return
 
     query = " ".join(context.args)
-    await update.message.reply_text(f"🔍 جاري البحث عن: {query}")
+    await update.message.reply_text(f"🔎 جاري البحث عن: {query} ...")
 
-    links = search_books(query)
+    links = await google_search(query)
     if not links:
-        await update.message.reply_text("❌ لم أجد نتائج. حاول بكلمات مختلفة.")
+        await update.message.reply_text("❌ لم أجد كتب PDF مطابقة، حاول كلمات مختلفة.")
         return
 
-    for link in links[:2]:  # أرسل أول نتيجتين فقط لتجنب الإزعاج
+    sent_any = False
+    for link in links[:2]:  # إرسال أول نتيجتين فقط
         try:
-            file_name = link.split("/")[-1]
-            r = requests.get(link)
-            if r.status_code == 200:
-                with open(file_name, "wb") as f:
-                    f.write(r.content)
-                await update.message.reply_document(open(file_name, "rb"), caption=f"📘 {file_name}")
-                os.remove(file_name)  # حذف الملف بعد الإرسال
+            async with aiohttp.ClientSession() as session:
+                async with session.get(link) as r:
+                    if r.status == 200:
+                        file_name = link.split("/")[-1]
+                        async with aiofiles.open(file_name, "wb") as f:
+                            await f.write(await r.read())
+
+                        await update.message.reply_document(open(file_name, "rb"), caption=f"📘 {file_name}")
+                        os.remove(file_name)
+                        sent_any = True
         except Exception as e:
-            await update.message.reply_text(f"⚠️ خطأ أثناء تحميل الملف: {e}")
+            print(f"⚠️ خطأ أثناء تحميل {link}: {e}")
+
+    if not sent_any:
+        await update.message.reply_text("⚠️ لم أتمكن من تحميل أي ملف PDF صالح.")
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🧠 الأوامر المتاحة:\n/start - بدء الاستخدام\n/search [اسم الكتاب] - البحث عن كتاب PDF")
+    await update.message.reply_text(
+        "🧠 الأوامر المتاحة:\n/start - بدء الاستخدام\n/search [اسم الكتاب] - البحث عن كتاب PDF"
+    )
 
 
 def main():

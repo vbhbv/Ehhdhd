@@ -4,7 +4,7 @@ import tempfile
 import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright, Page 
 from urllib.parse import urljoin 
@@ -16,37 +16,45 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
-# المصادر الأقل حماية فقط
 TRUSTED_DOMAINS = [
     "kotobati.com", 
     "masaha.org", 
-    "books-library.net"
+    "books-library.net",
+    "archive.org" # إضافة Archive.org لزيادة الدقة
 ]
 
-# --- دالة البحث الثورية (DuckDuckGo) ---
+# --- دالة البحث الثورية (DuckDuckGo) المُحسَّنة للدقة V7.1 ---
 async def search_duckduckgo(query: str):
-    """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
+    """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة باستخدام استعلامين لزيادة الدقة."""
     
+    # الاستعلام 1: التركيز على نوع الملف واسم الكتاب
+    query_1 = f'"{query}" filetype:pdf'
+    
+    # الاستعلام 2: التركيز على المواقع الموثوقة واسم الكتاب
     sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-    full_query = f"{query} filetype:pdf OR {sites_query}"
+    query_2 = f'"{query}" ({sites_query})'
     
-    print(f"Executing search query: {full_query}")
+    full_queries = [query_1, query_2]
     
-    results = []
+    all_results = []
     
-    # التأكد من استخدام DDGS بالشكل الصحيح
     with DDGS(timeout=5) as ddgs:
-        search_results = ddgs.text(full_query, max_results=10)
-        
-        for r in search_results:
-            link = r.get("href")
-            title = r.get("title")
+        for q in full_queries:
+            print(f"Executing search query: {q}")
             
-            if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
-                results.append({"title": title, "link": link})
+            search_results = ddgs.text(q, max_results=5) # 5 نتائج لكل استعلام
+            
+            for r in search_results:
+                link = r.get("href")
+                title = r.get("title")
+                
+                # نفلترة الروابط للتأكد من أنها PDF أو من مصدر موثوق
+                if link.lower().endswith(".pdf") or any(d in link for d in TRUSTED_DOMAINS):
+                    all_results.append({"title": title, "link": link})
 
+    # إزالة الروابط المكررة والحصول على أفضل 5 نتائج
     unique_links = {}
-    for item in results:
+    for item in all_results:
         unique_links[item['link']] = item
     
     return list(unique_links.values())[:5]
@@ -94,7 +102,7 @@ async def get_pdf_link_from_page(link: str):
     browser = None 
     
     # 💥 التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
-    if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
+    if link.lower().endswith('.pdf') or any(d in link.lower() for d in ['archive.org/download', 'drive.google.com']):
         print(f"Direct PDF link detected. Bypassing Playwright: {link}")
         return link, "Direct PDF"
         
@@ -193,7 +201,7 @@ async def get_pdf_link_from_page(link: str):
             print("تم ضمان إغلاق متصفح Playwright.")
 
 
-# --- باقي دوال تيليجرام (download_and_send_pdf، start، search_cmd، callback_handler، main) ---
+# --- دوال تيليجرام (download_and_send_pdf) تبقى كما هي ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()
@@ -235,19 +243,19 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 
 # --- دوال أوامر تيليجرام (Telegram Commands) ---
 
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 بوت القيامة جاهز!\n"
         "أرسل /search متبوعًا باسم الكتاب أو المؤلف."
     )
 
-async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    msg = await update.message.reply_text("🔍 أبحث عن الكتاب عبر DuckDuckGo (غير مقيد)...")
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري التنقيب عن أفضل المصادر)...")
     
     try:
         results = await search_duckduckgo(query)
@@ -257,28 +265,53 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         buttons = []
-        text_lines = []
+        text_lines = ["**نتائج البحث:**"]
         
         context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results]
         
         for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
-            source = next((d.replace('.com', '').replace('.net', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "رابط مباشر")
-            text_lines.append(f"{i+1}. {title} (المصدر: {source})")
-            buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
+            source = next((d.replace('.com', '').replace('.net', '').replace('.org', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "رابط مباشر")
             
+            text_lines.append(f"\n*{i+1}. {title}* (المصدر: {source})")
+            
+            # 💥 الصف الأول: زر التحميل ورابط المصدر (V8.0)
+            row1 = [
+                InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}"),
+                InlineKeyboardButton(f"🔗 رابط المصدر", url=item.get("link")) 
+            ]
+            buttons.append(row1)
+        
+        # 💥 أزرار التحكم في البحث (V8.0)
+        control_buttons = [
+            InlineKeyboardButton("🔁 بحث جديد", switch_inline_query_current_chat="/search "),
+            InlineKeyboardButton("❌ إخفاء القائمة", callback_data="hide")
+        ]
+        buttons.append(control_buttons)
+        
         reply = "\n".join(text_lines)
-        await msg.edit_text(reply, reply_markup=InlineKeyboardMarkup(buttons))
+        await msg.edit_text(reply, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
         
     except Exception as e:
          await msg.edit_text(f"⚠️ حدث خطأ أثناء البحث: {e}")
 
 
-async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     
+    # 💥 معالج زر الإخفاء (V8.0)
+    if data == "hide":
+        try:
+            await query.edit_message_text("✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.")
+        except:
+             await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text="✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.",
+            )
+        return
+
     if data.startswith("dl|"):
         try:
             index_str = data.split("|", 1)[1]

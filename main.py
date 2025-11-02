@@ -8,7 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright
 from urllib.parse import urljoin 
-# 💥 التعديل النهائي: الاستيراد من الحزمة الجديدة 'ddgs'
+# الاستيراد من الحزمة الجديدة 'ddgs'
 from ddgs import DDGS 
 
 # --- إعدادات البوت والثوابت ---
@@ -39,8 +39,8 @@ async def search_duckduckgo(query: str):
     
     results = []
     
-    # استخدام DDGS كمدير سياق
-    with DDGS(proxies=None, timeout=5) as ddgs:
+    # 💥 التعديل الحاسم: تمت إزالة الوسيط proxies=None
+    with DDGS(timeout=5) as ddgs:
         search_results = ddgs.text(full_query, max_results=10)
         
         # التكرار باستخدام حلقة for بسيطة

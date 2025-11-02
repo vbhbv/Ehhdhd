@@ -1,15 +1,28 @@
-# استخدام صورة بايثون أساسية مدمجة مع Playwright
-FROM mcr.microsoft.com/playwright/python:v1.46.0-buster-slim
+FROM python:3.11-slim-buster
 
-# تعيين دليل العمل
+
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libnss3 \
+    libfontconfig \
+    libasound2 \
+    
+    && rm -rf /var/lib/apt/lists/*
+
+
 WORKDIR /app
 
-# نسخ ملف متطلبات المكتبات وتثبيتها
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# نسخ الكود المتبقي (بما في ذلك main.py)
+
+
+RUN playwright install chromium --with-deps
+
+
 COPY . .
 
-# أمر التشغيل النهائي
+
 CMD ["python", "main.py"]

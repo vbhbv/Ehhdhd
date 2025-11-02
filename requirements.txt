@@ -4,3 +4,4 @@ scikit-learn
 joblib
 beautifulsoup4
 playwright
+python-telegram-bot

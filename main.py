@@ -6,7 +6,7 @@ from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page # تم إضافة Page هنا
 from urllib.parse import urljoin 
 from ddgs import DDGS 
 
@@ -24,7 +24,7 @@ TRUSTED_DOMAINS = [
 ]
 
 # --- دالة البحث الثورية (DuckDuckGo) ---
-
+# (تبقى كما هي من V3.1)
 async def search_duckduckgo(query: str):
     """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
     
@@ -51,12 +51,53 @@ async def search_duckduckgo(query: str):
     
     return list(unique_links.values())[:5]
 
+# --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة ---
+async def fallback_strategy_4_network_mine(page: Page, download_selector: str, link: str):
+    
+    network_urls = set()
 
-# --- دالة الاستخلاص المطلقة المعدلة (التنصت على نوع MIME) ---
+    def capture_url(response):
+        # نهتم بالتحويلات والاستجابات الناجحة
+        if response.status in [200, 206, 301, 302]:
+            network_urls.add(response.url)
+            
+    # تفعيل التنصت على استجابات الشبكة
+    page.on("response", capture_url)
+    
+    try:
+        # ننقر مرة أخرى لضمان تفعيل المسار
+        # استخدام locator للنقر (أفضل ممارسة في Playwright)
+        await page.locator(download_selector).click(timeout=15000) 
+        
+        # ننتظر لفترة كافية لتحميل كل التحويلات
+        await asyncio.sleep(7) 
+        
+        # إزالة المنصت
+        page.remove_listener("response", capture_url)
+        
+        # البحث في الروابط التي تم التقاطها
+        for url in network_urls:
+            url_lower = url.lower()
+            if url_lower.endswith('.pdf') or 'drive.google.com' in url_lower or 'dropbox.com' in url_lower:
+                print(f"PDF link found via Network Mining: {url}")
+                return url
+        
+        return None 
+        
+    except Exception as e:
+        print(f"Network mining failed: {e}")
+        return None
+    finally:
+         # التأكد من إزالة المنصت
+         if page.listeners("response"):
+             page.remove_listener("response", capture_url)
+
+
+# --- دالة الاستخلاص المطلقة المُحسَّنة (V6.0) ---
 async def get_pdf_link_from_page(link: str):
     """
     يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF
-    عن طريق فحص نوع MIME، وهي أقوى إستراتيجية.
+    بإستراتيجيات متعددة (التزامن، التنقيب، فحص HTML).
     """
     pdf_link = None
     page_title = "book" 
@@ -73,51 +114,95 @@ async def get_pdf_link_from_page(link: str):
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # 💥 التعديل الأول: توسيع نطاق البحث عن زر التحميل
-            download_selector = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
+            # 1. تحديد CSS Selector الشامل
+            download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
+            
+            # 2. إنشاء مُحدد موقع (Locator) قوي (لم يُستخدم في gather لكنه جاهز)
+            # نستخدم locator.or لتغطية النص وعنوان الـ CSS
+            download_selector = page.locator(download_selector_css).or_(
+                page.get_by_role("button", name="تحميل")
+            ).or_(
+                page.get_by_role("link", name="Download")
+            )
 
-            # --- النقر والتنصت (باستخدام الصيغة المباشرة) ---
+            # --- محاولة 1: التزامن (gather) ---
             try:
-                # نستخدم asyncio.gather لتشغيل النقر وانتظار الاستجابة معًا
+                # 💥 التعديل الحاسم: توسيع الشرط ليشمل 301/302 أو انتهاء الرابط بـ .pdf
                 pdf_response, _ = await asyncio.gather(
                     page.wait_for_response(
-                        lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
-                        timeout=30000 # انتظار لمدة 30 ثانية
+                        lambda response: response.status in [200, 206, 301, 302] and (
+                            'application/pdf' in response.headers.get('content-type', '') or 
+                            response.url.lower().endswith('.pdf')
+                        ),
+                        timeout=30000
                     ),
-                    # 💥 التعديل الثاني: زيادة مهلة النقر إلى 25 ثانية
-                    page.click(download_selector, timeout=25000) 
+                    # نستخدم النقر المباشر على CSS selector لتبسيط gather
+                    page.click(download_selector_css, timeout=25000) 
                 )
                 
-                # إذا نجحت المهمتان، فهذا هو الرابط
                 pdf_link = pdf_response.url
                 
             except Exception as e:
-                # الخطة الاحتياطية: إذا فشل التزامن (gather)، نجرب النقر ثم التأخير ثم الانتظار
-                print(f"Initial gather failed, attempting fallback: {e}")
+                print(f"Initial gather failed, attempting fallback strategies: {e}")
                 
+                # --- محاولة 2: النقر ثم التأخير ثم التنصت ---
                 try:
-                    # نستخدم الخطة الاحتياطية بمهلة النقر الجديدة
-                    await page.click(download_selector, timeout=25000) 
+                    # النقر مرة أخرى بمهلة 25 ثانية
+                    await page.click(download_selector_css, timeout=25000) 
                     await asyncio.sleep(4)
                     
-                    # محاولة انتظار الاستجابة مرة أخرى بعد النقر والتأخير
+                    # محاولة انتظار الاستجابة مرة أخرى
                     pdf_response = await page.wait_for_response(
-                        lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
+                         lambda response: response.status in [200, 206, 301, 302] and (
+                            'application/pdf' in response.headers.get('content-type', '') or 
+                            response.url.lower().endswith('.pdf')
+                        ),
                         timeout=10000 
                     )
                     pdf_link = pdf_response.url
                     
-                except Exception as final_error:
-                    print(f"Final fallback failed, PDF link not found: {final_error}")
-                    pass 
-            
+                except Exception as fallback_error:
+                    print(f"Second fallback failed, checking HTML (Strategy 3): {fallback_error}")
+                    
+                    # --- محاولة 3: فحص HTML بعد النقر والتأخير ---
+                    await asyncio.sleep(5) 
+                    final_html_content = await page.content()
+                    final_soup = BeautifulSoup(final_html_content, "html.parser")
+                    
+                    for a_tag in final_soup.find_all('a', href=True):
+                        href = urljoin(link, a_tag['href'])
+                        href_lower = href.lower()
+                        
+                        if href_lower.endswith('.pdf'):
+                            pdf_link = href
+                            print(f"PDF link found in HTML (Strategy 3): {pdf_link}")
+                            break
+                        
+                    if not pdf_link:
+                         for a_tag in final_soup.find_all('a', href=True):
+                            href = urljoin(link, a_tag['href'])
+                            href_lower = href.lower()
+
+                            if 'download' in href_lower or 'drive.google.com' in href_lower or 'dropbox.com' in href_lower:
+                                pdf_link = href
+                                print(f"General download link found in HTML (Strategy 3): {pdf_link}")
+                                break
+                    
+                    # --- محاولة 4 (الأخيرة): التنقيب في الشبكة ---
+                    if not pdf_link:
+                         print("HTML check failed. Executing Network Mining (Strategy 4).")
+                         pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
+
+
             return pdf_link, page_title
     
     except Exception as e:
         print(f"Critical error in get_pdf_link_from_page: {e}")
+        # إذا كان الخطأ هو TimeOut، فقد يكون بسبب فشل في goto أو مشاكل المتصفح
         raise e
     
     finally:
+        # ... (ضمان إغلاق المتصفح) ...
         if 'page' in locals():
             try:
                 await page.close()
@@ -126,6 +211,7 @@ async def get_pdf_link_from_page(link: str):
         if browser:
             await browser.close()
             print("تم ضمان إغلاق متصفح Playwright.")
+
 
 # --- دوال تيليجرام (download_and_send_pdf، start، search_cmd، callback_handler، main) تبقى كما هي بدون تغيير ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):

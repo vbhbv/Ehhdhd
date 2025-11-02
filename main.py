@@ -17,21 +17,21 @@ MIN_PDF_SIZE_BYTES = 50 * 1024
 TEMP_LINKS_KEY = "current_search_links" 
 TRUSTED_DOMAINS = [
     "kotobati.com", 
-    "masaha.org", # لم تُضاف كدالة بحث متخصصة لعدم وجود نمط واضح
+    "masaha.org", 
     "archive.org"
 ]
 
-# 💥 أنماط البحث المخصص (V9.0) - تم إلغاء DDGS
+# 💥 أنماط البحث المخصص (V9.2)
 SITE_SEARCH_PATTERNS = {
     "kotobati.com": "https://kotobati.com/search?q={query}",
     "archive.org": "https://archive.org/details/texts?query={query}",
-    # يمكن إضافة المزيد هنا (مثل Masaha)
 }
 
-# --- دالة البحث المخصص الجديدة (V9.0) ---
+# --- دالة البحث المخصص المُبتكرة (V9.2) ---
 async def search_site_and_extract_links(query: str):
     """
-    يقوم بالبحث مباشرة داخل المواقع الموثوقة ويستخلص روابط الكتب الفردية.
+    يقوم بالبحث مباشرة داخل المواقع الموثوقة باستخدام Playwright Locators المُحسّنة.
+    تعتمد على الفلترة النصية المتقدمة واستهداف أنماط الروابط التفصيلية لزيادة الكفاءة والدقة.
     """
     results = []
     
@@ -46,28 +46,38 @@ async def search_site_and_extract_links(query: str):
                 try:
                     print(f"Searching {domain} at: {search_url}")
                     await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    html_content = await page.content()
-                    soup = BeautifulSoup(html_content, "html.parser")
-
-                    if "kotobati.com" in domain:
-                        # محددات Kotobati (قد تحتاج لتعديل بسيط بناءً على الهيكلية الحالية)
-                        book_cards = soup.select('.book-item a') 
-                        for card in book_cards[:3]: 
-                            link = urljoin(url_pattern, card.get('href'))
-                            title_tag = card.select_one('.book-title')
-                            if title_tag and link:
-                                 results.append({"title": title_tag.text.strip(), "link": link})
-
-                    elif "archive.org" in domain:
-                        # محددات Archive.org
-                        item_links = soup.select('.item-ttl a')
-                        for link_tag in item_links[:3]:
-                            link = urljoin(url_pattern, link_tag.get('href'))
-                            title = link_tag.text.strip()
-                            results.append({"title": title, "link": link})
+                    
+                    # 💥 الابتكار: استخدام محدد Playwright النصي (Locator by Text)
+                    # التعبير النمطي للبحث عن أي من الكلمات المفتاحية في نص الرابط (غير حساس لحالة الأحرف)
+                    text_pattern = f"/{query}|كتاب|book/i" 
+                    
+                    # اختيار الروابط التي تحتوي على هذا النص
+                    # 'a:has-text()' يوجه Playwright لجمع العناصر المؤهلة فقط
+                    book_links_elements = await page.locator(f'a:has-text({text_pattern})').all()
+                    
+                    found_count = 0
+                    for element in book_links_elements:
+                        if found_count >= 3: # نكتفي بـ 3 نتائج مؤكدة من كل موقع
+                            break
                             
-                    if len(results) >= 6:
-                        break
+                        link = await element.get_attribute('href')
+                        title = await element.text_content()
+                        
+                        link = urljoin(search_url, link)
+                        
+                        # 💥 الابتكار: التحقق من أنماط الروابط التفصيلية
+                        is_detail_page = (
+                            'kotobati.com/book/' in link.lower() or
+                            'archive.org/details/' in link.lower()
+                        )
+                        
+                        # شروط القبول المُحسّنة: 
+                        # يجب أن يكون رابط صفحة تفصيلية، ويجب أن يحتوي على عنوان، ولا يكون رابط صفحة البحث
+                        if is_detail_page and title.strip() and link != search_url:
+                            # لمنع التكرار والحصول على عنوان واضح
+                            if link not in [item['link'] for item in results]:
+                                results.append({"title": title.strip(), "link": link})
+                                found_count += 1
 
                 except Exception as e:
                     print(f"Error searching {domain}: {e}")
@@ -144,6 +154,7 @@ async def get_pdf_link_from_page(link: str):
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
+            # محددات عامة لأزرار التحميل
             download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
             
             # --- محاولة 1: التزامن (gather) ---
@@ -163,10 +174,6 @@ async def get_pdf_link_from_page(link: str):
                 
             except Exception as e:
                 print(f"Initial gather failed, attempting fallback strategies: {e}")
-                
-                # --- محاولة 2 و 3 و 4 (البقية) ---
-                
-                # ... (هنا يتم إدراج المحاولات 2 و 3 و 4 المتبقية، والتي لم تتغير عن V7.0) ...
                 
                 # --- محاولة 2: النقر ثم التأخير ثم التنصت ---
                 try:
@@ -214,9 +221,6 @@ async def get_pdf_link_from_page(link: str):
                          print("HTML check failed. Executing Network Mining (Strategy 4).")
                          pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
                 
-            # ... (نهاية المحاولات 2 و 3 و 4) ...
-
-
             return pdf_link, page_title
     
     except Exception as e:
@@ -288,11 +292,11 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    # 💥 استدعاء دالة البحث المخصص (V9.0)
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المخصص داخل المكتبات)...")
+    # 💥 استدعاء دالة البحث المخصص (V9.2)
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المخصص المُحسّن)...")
     
     try:
-        results = await search_site_and_extract_links(query) # 💥 التغيير هنا
+        results = await search_site_and_extract_links(query) 
 
         if not results:
             await msg.edit_text("❌ لم أجد نتائج موثوقة في المكتبات المختارة. حاول بكلمات مختلفة.")
@@ -301,6 +305,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         text_lines = ["**نتائج البحث:**"]
         
+        # تخزين جميع الروابط للاستخدام لاحقًا
         context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results]
         
         for i, item in enumerate(results, start=0):
@@ -310,7 +315,7 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             text_lines.append(f"\n*{i+1}. {title}* (المصدر: {source})")
             
-            # أزرار الواجهة (V8.0)
+            # أزرار الواجهة
             row1 = [
                 InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}"),
                 InlineKeyboardButton(f"🔗 رابط المصدر", url=item.get("link")) 
@@ -335,7 +340,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     
-    # معالج زر الإخفاء (V8.0)
+    # معالج زر الإخفاء 
     if data == "hide":
         try:
             await query.edit_message_text("✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.")

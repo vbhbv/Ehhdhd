@@ -2,100 +2,98 @@ import os
 import asyncio
 import tempfile
 import aiofiles
-import random 
+import random
+import re
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
-from urllib.parse import urljoin 
-from ddgs import DDGS
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+from urllib.parse import urljoin
 
 # --- إعدادات البوت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
-MIN_PDF_SIZE_BYTES = 50 * 1024 
-TEMP_LINKS_KEY = "current_search_links" 
+MIN_PDF_SIZE_BYTES = 50 * 1024
+TEMP_LINKS_KEY = "current_search_links"
 
 # --- 50 مكتبة عربية ---
-TRUSTED_DOMAINS = [
-    "ketabpedia.com", "sahm-book.com", "foulabook.com", "mktbtypdf.com", "kotobati.com",
-    "masaha.org", "almeshkat.com", "noor-book.com", "almeshkat.net", "arab-pdf.com",
-    "kitab4u.com", "kutub.info", "library4all.com", "al-fikr.com", "almaktaba.org",
-    "books-world.net", "al-islah.org", "pdf4arab.com", "freearabebooks.com", "arbookshop.com",
-    "almeshkatbooks.com", "arpdf.net", "pdfbooksarab.com", "al-maktabah.com", "arabebooksite.com",
-    "kutub-pdf.com", "ebook-4arab.com", "almeshkat-ebooks.com", "kutubarabia.net", "pdf-ebooksarab.com",
-    "alkitabonline.com", "arbooks.net", "freearabicbooks.com", "arabicpdfbooks.net", "kutubpdf.com",
-    "arabicbookarchive.com", "kutub-ebooks.com", "pdfkitab.com", "alkitabpdf.com", "arabicbooklibrary.com",
-    "almeshkatpdf.com", "kutub-arab.com", "pdfarabicbooks.com", "ebooks4arab.com", "kutubonline.net",
-    "pdfbooks4arab.com", "arabiclibrary.org", "kutubfree.com", "ebooks-arab.com", "kitabpdf.net"
+LIBRARY_SITES = [
+    "https://ketabpedia.com", "https://sahm-book.com", "https://foulabook.com", "https://mktbtypdf.com",
+    "https://kotobati.com", "https://masaha.org", "https://almeshkat.com", "https://noor-book.com",
+    "https://almeshkat.net", "https://arab-pdf.com", "https://kitab4u.com", "https://kutub.info",
+    "https://library4all.com", "https://al-fikr.com", "https://almaktaba.org", "https://books-world.net",
+    "https://al-islah.org", "https://pdf4arab.com", "https://freearabebooks.com", "https://arbookshop.com",
+    "https://almeshkatbooks.com", "https://arpdf.net", "https://pdfbooksarab.com", "https://al-maktabah.com",
+    "https://arabebooksite.com", "https://kutub-pdf.com", "https://ebook-4arab.com", "https://almeshkat-ebooks.com",
+    "https://kutubarabia.net", "https://pdf-ebooksarab.com", "https://alkitabonline.com", "https://arbooks.net",
+    "https://freearabicbooks.com", "https://arabicpdfbooks.net", "https://kutubpdf.com", "https://arabicbookarchive.com",
+    "https://kutub-ebooks.com", "https://pdfkitab.com", "https://alkitabpdf.com", "https://arabicbooklibrary.com",
+    "https://almeshkatpdf.com", "https://kutub-arab.com", "https://pdfarabicbooks.com", "https://ebooks4arab.com",
+    "https://kutubonline.net", "https://pdfbooks4arab.com", "https://arabiclibrary.org", "https://kutubfree.com",
+    "https://ebooks-arab.com", "https://kitabpdf.net"
 ]
 
-# --- دالة البحث المحدثة ---
-async def search_duckduckgo(query: str):
-    sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-    full_query = f"{query} filetype:pdf OR {sites_query}"
+# --- دالة البحث المباشر في المكتبات ---
+async def search_libraries(query: str):
+    headers = USER_AGENT_HEADER.copy()
     results = []
 
-    try:
-        with DDGS(timeout=5) as ddgs:
-            search_results = ddgs.text(full_query, max_results=30)  # زيادة عدد النتائج
-            for r in search_results:
-                link = r.get("href")
-                title = r.get("title")
-                if link and title:
-                    # السماح بروابط PDF مباشرة أو من المكتبات العربية
-                    if link.lower().endswith(".pdf") or any(d in link for d in TRUSTED_DOMAINS):
-                        results.append({"title": title.strip(), "link": link})
-    except Exception as e:
-        print(f"DDGS search failed: {e}")
-        return []
+    async with ClientSession() as session:
+        for site in LIBRARY_SITES:
+            try:
+                # نبحث في صفحة البحث الخاصة بالموقع
+                search_url = f"{site}/search?q={query.replace(' ', '+')}"
+                async with session.get(search_url, headers=headers, timeout=15) as resp:
+                    if resp.status != 200:
+                        continue
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+
+                    # البحث عن روابط PDF أو زر تحميل
+                    for a in soup.find_all("a", href=True):
+                        href = urljoin(site, a['href'])
+                        title = a.get_text(strip=True) or "كتاب بدون عنوان"
+
+                        # قبول أي PDF مباشر أو صفحة تحميل
+                        if href.lower().endswith(".pdf") or "download" in href.lower():
+                            results.append({
+                                "title": title,
+                                "link": href,
+                                "source": site
+                            })
+            except Exception:
+                continue
 
     # إزالة الروابط المكررة
     unique_links = {}
     for item in results:
         unique_links[item['link']] = item
+    return list(unique_links.values())[:10]  # أفضل 10 روابط
 
-    return list(unique_links.values())[:10]  # إرجاع أفضل 10 نتائج
+# --- دالة تحميل PDF وإرساله ---
+async def download_and_send_pdf(context, chat_id, source, title="book.pdf"):
+    tmp_dir = tempfile.gettempdir()
+    safe_title = re.sub(r"[\\/*?\"<>|]", "_", title)[:50]
+    file_path = os.path.join(tmp_dir, f"{safe_title}.pdf")
 
-# --- دالة تحميل وإرسال PDF ---
-async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_local_path=False, referer_link=None):
-    if is_local_path:
-        file_path = source 
-    else:
-        pdf_url = source
-        download_headers = USER_AGENT_HEADER.copy()
-        if referer_link:
-            download_headers['Referer'] = referer_link
-
-        async with ClientSession() as session:
-            try:
-                async with session.head(pdf_url, headers=download_headers, allow_redirects=True, timeout=10) as head_resp: 
-                    content_type = head_resp.headers.get('Content-Type', '').lower()
-                    content_length = int(head_resp.headers.get('Content-Length', 0))
-                    if 'application/pdf' not in content_type and 'octet-stream' not in content_type:
-                        await context.bot.send_message(chat_id=chat_id, text=f"⚠️ الرابط المستخلص لا يشير إلى PDF ({content_type})")
-                        return
-                    if content_length < MIN_PDF_SIZE_BYTES:
-                        await context.bot.send_message(chat_id=chat_id, text="⚠️ حجم الملف صغير جدًا.")
-                        return
-            except Exception as e:
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ فشل التحقق من الملف: {e}")
-                return
-
-            tmp_dir = tempfile.gettempdir()
-            safe_title = title.replace("/", "_")[:40]
-            file_path = os.path.join(tmp_dir, f"{safe_title}.pdf")
-
-            async with session.get(pdf_url, headers=download_headers) as resp: 
+    async with ClientSession() as session:
+        try:
+            async with session.get(source, headers=USER_AGENT_HEADER, timeout=30) as resp:
                 if resp.status != 200:
-                    await context.bot.send_message(chat_id=chat_id, text=f"⚠️ فشل تحميل الملف. رمز الخطأ: {resp.status}")
+                    await context.bot.send_message(chat_id=chat_id, text=f"⚠️ فشل تحميل الملف: {resp.status}")
                     return
                 content = await resp.read()
+                if len(content) < MIN_PDF_SIZE_BYTES:
+                    await context.bot.send_message(chat_id=chat_id, text="⚠️ حجم الملف صغير جدًا.")
+                    return
                 async with aiofiles.open(file_path, "wb") as f:
                     await f.write(content)
+        except Exception as e:
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء تحميل الملف: {e}")
+            return
 
-    # إرسال الملف وحذفه
+    # إرسال الملف وحذفه بعد الإرسال
     try:
         with open(file_path, "rb") as f:
             await context.bot.send_document(chat_id=chat_id, document=f)
@@ -106,39 +104,33 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_l
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# --- دوال Telegram الأساسية ---
+# --- Telegram handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 بوت الكتب العربية جاهز!\n"
-        "أرسل /search متبوعًا باسم الكتاب أو المؤلف."
-    )
+    await update.message.reply_text("📚 بوت الكتب العربية جاهز! استخدم /search متبوعًا باسم الكتاب أو المؤلف.")
 
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
-
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** في المكتبات العربية...")
+    msg = await update.message.reply_text(f"🔍 أبحث عن '{query}' في المكتبات العربية...")
     try:
-        results = await search_duckduckgo(query)
+        results = await search_libraries(query)
         if not results:
             await msg.edit_text("❌ لم أجد نتائج في المكتبات العربية.")
             return
 
         buttons = []
         text_lines = []
-        context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results]
-        for i, item in enumerate(results, start=0):
-            title = item.get("title")[:120]
-            text_lines.append(f"{i+1}. {title}")
+        context.user_data[TEMP_LINKS_KEY] = [item["link"] for item in results]
+        for i, item in enumerate(results):
+            title = item["title"][:100]
+            text_lines.append(f"{i+1}. {title} ({item['source']})")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
-        reply = "\n".join(text_lines)
-        await msg.edit_text(reply, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        await msg.edit_text("\n".join(text_lines), reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         await msg.edit_text(f"⚠️ خطأ أثناء البحث: {e}")
 
-# --- Callback لتحميل الملف ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -146,19 +138,16 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("dl|"):
         index = int(data.split("|")[1])
         link = context.user_data[TEMP_LINKS_KEY][index]
-        await query.edit_message_text("⏳ تحميل الكتاب من المكتبة العربية...")
+        await query.edit_message_text("⏳ تحميل الكتاب...")
         await download_and_send_pdf(context, query.message.chat_id, link, title=f"book_{index+1}.pdf")
 
-# --- Main ---
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN مفقود في المتغيرات البيئية.")
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
-
     print("البوت بدأ العمل.")
     app.run_polling()
 

@@ -35,7 +35,6 @@ async def search_duckduckgo(query: str):
     
     results = []
     
-    # تم إزالة proxies=None لـ DDGS
     with DDGS(timeout=5) as ddgs:
         search_results = ddgs.text(full_query, max_results=10)
         
@@ -74,18 +73,19 @@ async def get_pdf_link_from_page(link: str):
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # تحديد CSS Selector للزر الأكثر احتمالية
-            download_selector = 'a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل")'
+            # 💥 التعديل الأول: توسيع نطاق البحث عن زر التحميل
+            download_selector = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
 
-            # 💥 التحسين الرئيسي: استخدام asyncio.gather لانتظار النقر والاستجابة معًا
+            # --- النقر والتنصت (باستخدام الصيغة المباشرة) ---
             try:
-                # نقوم بإنشاء مهمتين: انتظار الاستجابة، والنقر (الذي سيطلق الاستجابة)
+                # نستخدم asyncio.gather لتشغيل النقر وانتظار الاستجابة معًا
                 pdf_response, _ = await asyncio.gather(
                     page.wait_for_response(
                         lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
                         timeout=30000 # انتظار لمدة 30 ثانية
                     ),
-                    page.click(download_selector, timeout=15000)
+                    # 💥 التعديل الثاني: زيادة مهلة النقر إلى 25 ثانية
+                    page.click(download_selector, timeout=25000) 
                 )
                 
                 # إذا نجحت المهمتان، فهذا هو الرابط
@@ -96,19 +96,20 @@ async def get_pdf_link_from_page(link: str):
                 print(f"Initial gather failed, attempting fallback: {e}")
                 
                 try:
-                    await page.click(download_selector, timeout=15000)
+                    # نستخدم الخطة الاحتياطية بمهلة النقر الجديدة
+                    await page.click(download_selector, timeout=25000) 
                     await asyncio.sleep(4)
                     
                     # محاولة انتظار الاستجابة مرة أخرى بعد النقر والتأخير
                     pdf_response = await page.wait_for_response(
                         lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
-                        timeout=10000 # مهلة أقل في الخطة الاحتياطية
+                        timeout=10000 
                     )
                     pdf_link = pdf_response.url
                     
                 except Exception as final_error:
                     print(f"Final fallback failed, PDF link not found: {final_error}")
-                    pass # إذا فشل كل شيء، يبقى pdf_link = None
+                    pass 
             
             return pdf_link, page_title
     

@@ -12,7 +12,8 @@ from urllib.parse import urljoin
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+# نستخدم خيارات متقدمة لوكيل المستخدم
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
 TRUSTED_DOMAINS = [
@@ -21,21 +22,62 @@ TRUSTED_DOMAINS = [
     "archive.org"
 ]
 
-# 💥 أنماط البحث المخصص (V9.3)
+# 💥 أنماط البحث المخصص (V9.4)
 SITE_SEARCH_PATTERNS = {
     "kotobati.com": "https://kotobati.com/search?q={query}",
     "archive.org": "https://archive.org/details/texts?query={query}",
 }
 
-# --- دالة البحث المخصص المُصححة (V9.3) ---
+# --- دالة البحث المخصص المُبتكرة (V9.4 - حقن JavaScript) ---
 async def search_site_and_extract_links(query: str):
     """
-    يقوم بالبحث مباشرة داخل المواقع الموثوقة باستخدام Playwright لسحب المحتوى وتحليل الهيكل (BeautifulSoup) لضمان الدقة (V9.3).
+    تستخدم Playwright لتنفيذ كود JavaScript داخلي لجمع الروابط والعناوين،
+    متجاوزة بذلك مشاكل المحددات CSS الثابتة.
     """
     results = []
     
+    # 💥 الابتكار الجذري: كود JavaScript للبحث في DOM الصفحة
+    js_scraper = f"""
+    (function() {{
+        const query = "{query}".toLowerCase();
+        const searchPatterns = ['book', 'details']; 
+
+        // جمع جميع الروابط
+        const allLinks = Array.from(document.querySelectorAll('a[href]'));
+
+        const results = allLinks
+            .map(element => {{
+                const link = element.href;
+                const title = element.textContent.trim();
+                
+                // شروط التطابق (مسار تفصيلي أو عنوان يحتوي على نص البحث)
+                const isMatch = searchPatterns.some(pattern => link.toLowerCase().includes(pattern)) || 
+                                title.toLowerCase().includes(query) || 
+                                title.toLowerCase().includes('كتاب');
+                
+                // منع روابط الصفحة الرئيسية وروابط البحث
+                const isNotHomePage = link !== window.location.origin + '/' && 
+                                      link !== window.location.href;
+
+                // التصفية النهائية
+                if (isMatch && isNotHomePage && title.length > 5) {{
+                    return {{ title: title, link: link }}};
+                }}
+                return null;
+            }})
+            .filter(item => item !== null); 
+
+        // إرجاع قائمة فريدة من الروابط (لتجنب التكرار)
+        const uniqueLinks = Array.from(new Set(results.map(a => a.link)))
+            .map(link => results.find(a => a.link === link));
+            
+        return uniqueLinks.slice(0, 3); // نكتفي بأول 3 نتائج من كل موقع
+    }})()
+    """
+    
     try:
         async with async_playwright() as p:
+            # إطلاق المتصفح
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
 
@@ -43,44 +85,15 @@ async def search_site_and_extract_links(query: str):
                 search_url = url_pattern.format(query=query)
                 
                 try:
-                    print(f"Searching {domain} at: {search_url}")
                     await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
                     
-                    # 💥 الاستراتيجية: سحب المحتوى والتحليل بـ BeautifulSoup بمحددات عامة
-                    html_content = await page.content()
-                    soup = BeautifulSoup(html_content, "html.parser")
+                    # 💥 تنفيذ كود JavaScript مباشرة
+                    site_results = await page.evaluate(js_scraper)
                     
-                    # 1. Kotobati: البحث عن جميع الروابط التي تحتوي على كلمة 'book' في مسارها
-                    if "kotobati.com" in domain:
-                        all_links = soup.find_all('a', href=lambda href: href and 'book' in href.lower())
-                    
-                    # 2. Archive.org: البحث عن جميع الروابط التي تحتوي على كلمة 'details' في مسارها
-                    elif "archive.org" in domain:
-                        all_links = soup.find_all('a', href=lambda href: href and 'details' in href.lower())
-
-                    else:
-                        all_links = []
-                        
-                    found_count = 0
-                    for tag in all_links:
-                        if found_count >= 3:
-                            break
-                            
-                        link = urljoin(search_url, tag.get('href'))
-                        title = tag.text.strip()
-                        
-                        # شروط القبول:
-                        is_detail_page = (
-                            'kotobati.com/book/' in link.lower() or
-                            'archive.org/details/' in link.lower()
-                        )
-                        
-                        # الرابط يجب أن يكون رابط صفحة تفصيلية، وأن يحتوي على عنوان واضح (أكثر من 5 أحرف)، وليس صفحة البحث
-                        if is_detail_page and title and link != search_url:
-                            # فلترة النتائج المكررة أو ذات العنوان القصير جداً
-                            if link not in [item['link'] for item in results] and len(title) > 5:
-                                results.append({"title": title, "link": link})
-                                found_count += 1
+                    for item in site_results:
+                         # التحقق الأخير: يجب أن يكون الرابط ضمن النطاق الموثوق
+                         if any(d in item['link'] for d in SITE_SEARCH_PATTERNS.keys()):
+                            results.append(item)
 
                 except Exception as e:
                     print(f"Error searching {domain}: {e}")
@@ -99,7 +112,7 @@ async def search_site_and_extract_links(query: str):
     return list(unique_links.values())[:5]
 
 
-# --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة ---
+# --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة (تبقى كما هي) ---
 async def fallback_strategy_4_network_mine(page: Page, download_selector_css: str, link: str):
     
     network_urls = set()
@@ -132,10 +145,11 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         except:
             pass 
 
-# --- دالة الاستخلاص المطلقة (V7.0) ---
+# --- دالة الاستخلاص المطلقة (V9.4 - Playwright Hardening) ---
 async def get_pdf_link_from_page(link: str):
     """
     يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF.
+    تستخدم خيارات إطلاق متصفح محصّنة ضد آليات اكتشاف البوتات.
     """
     pdf_link = None
     page_title = "book" 
@@ -148,8 +162,19 @@ async def get_pdf_link_from_page(link: str):
         
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            # 💥 إطلاق المتصفح بخيارات محاكاة جهاز حقيقي
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled', # تعطيل علامات البوت الشهيرة
+                    f'--user-agent={USER_AGENT}'
+                ]
+            )
             page = await browser.new_page()
+            
+            # ملاحظة: يمكن إضافة تطبيق Stealth Mode هنا إذا تم تثبيت مكتبات playwright-extra
             
             await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
             
@@ -248,7 +273,8 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
     
     async with ClientSession() as session:
-        async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
+        # استخدام وكيل المستخدم المحصن
+        async with session.get(pdf_url, headers={'User-Agent': USER_AGENT}) as resp:
             if resp.status != 200:
                 await context.bot.send_message(
                     chat_id=chat_id, 
@@ -295,8 +321,8 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    # 💥 استدعاء دالة البحث المخصص (V9.3)
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المتخصص المُحسّن)...")
+    # 💥 استدعاء دالة البحث المخصص (V9.4)
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث الجذري المُحسّن)...")
     
     try:
         results = await search_site_and_extract_links(query) 

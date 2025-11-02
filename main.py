@@ -8,7 +8,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright
 from urllib.parse import urljoin 
-# الاستيراد من الحزمة الجديدة 'ddgs'
 from ddgs import DDGS 
 
 # --- إعدادات البوت والثوابت ---
@@ -29,30 +28,24 @@ TRUSTED_DOMAINS = [
 async def search_duckduckgo(query: str):
     """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
     
-    # بناء استعلام يستهدف المواقع الموثوقة
     sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
-    
-    # التحسين: إضافة filetype:pdf لتعزيز البحث المباشر
     full_query = f"{query} filetype:pdf OR {sites_query}"
     
     print(f"Executing search query: {full_query}")
     
     results = []
     
-    # 💥 التعديل الحاسم: تمت إزالة الوسيط proxies=None
+    # تم إزالة proxies=None لـ DDGS
     with DDGS(timeout=5) as ddgs:
         search_results = ddgs.text(full_query, max_results=10)
         
-        # التكرار باستخدام حلقة for بسيطة
         for r in search_results:
             link = r.get("href")
             title = r.get("title")
             
-            # التصفية: قبول الروابط التي تنتهي بـ .pdf أو من المواقع الموثوقة
             if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
                 results.append({"title": title, "link": link})
 
-    # إزالة التكرارات وضمان 5 نتائج فقط
     unique_links = {}
     for item in results:
         unique_links[item['link']] = item
@@ -75,65 +68,65 @@ async def get_pdf_link_from_page(link: str):
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            # تحسين: زيادة مهلة الانتقال للصفحة
             await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
             
             html_content = await page.content()
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # --- 1. وضع مؤشر انتظار الاستجابة حسب نوع MIME ---
-            pdf_response_task = asyncio.create_task(
-                page.wait_for_response(
-                    lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
-                    timeout=30000 
-                )
-            )
-
             # تحديد CSS Selector للزر الأكثر احتمالية
             download_selector = 'a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل")'
 
-            # --- 2. الضغط على الزر لتوليد الطلب ---
+            # 💥 التحسين الرئيسي: استخدام asyncio.gather لانتظار النقر والاستجابة معًا
             try:
-                # زيادة مهلة النقر قليلاً
-                await page.click(download_selector, timeout=15000) 
+                # نقوم بإنشاء مهمتين: انتظار الاستجابة، والنقر (الذي سيطلق الاستجابة)
+                pdf_response, _ = await asyncio.gather(
+                    page.wait_for_response(
+                        lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
+                        timeout=30000 # انتظار لمدة 30 ثانية
+                    ),
+                    page.click(download_selector, timeout=15000)
+                )
                 
-                # الإضافة الحاسمة: الانتظار قليلاً بعد النقر لتوليد الرابط ديناميكياً
-                await asyncio.sleep(4) 
-            except Exception as click_error:
-                print(f"Click failed, proceeding to wait: {click_error}")
-                
-            # --- 3. انتظار المهمة لتعود بالاستجابة ---
-            try:
-                # أعط مهمة التنصت مهلة أطول
-                pdf_response = await asyncio.wait_for(pdf_response_task, timeout=35) 
+                # إذا نجحت المهمتان، فهذا هو الرابط
                 pdf_link = pdf_response.url
-            except asyncio.TimeoutError:
-                print("PDF response wait timed out.")
+                
             except Exception as e:
-                print(f"Error during PDF response wait: {e}")
-
-            # تم إلغاء البحث الاحتياطي في HTML (تحسين)
+                # الخطة الاحتياطية: إذا فشل التزامن (gather)، نجرب النقر ثم التأخير ثم الانتظار
+                print(f"Initial gather failed, attempting fallback: {e}")
+                
+                try:
+                    await page.click(download_selector, timeout=15000)
+                    await asyncio.sleep(4)
+                    
+                    # محاولة انتظار الاستجابة مرة أخرى بعد النقر والتأخير
+                    pdf_response = await page.wait_for_response(
+                        lambda response: response.status in [200, 206] and 'application/pdf' in response.headers.get('content-type', ''),
+                        timeout=10000 # مهلة أقل في الخطة الاحتياطية
+                    )
+                    pdf_link = pdf_response.url
+                    
+                except Exception as final_error:
+                    print(f"Final fallback failed, PDF link not found: {final_error}")
+                    pass # إذا فشل كل شيء، يبقى pdf_link = None
             
             return pdf_link, page_title
     
     except Exception as e:
-        # تحسين: تسجيل الخطأ بوضوح قبل إعادة رفعه
         print(f"Critical error in get_pdf_link_from_page: {e}")
         raise e
     
     finally:
-        # تحسين: إغلاق الصفحة والمتصفح بوضوح في كل الحالات
         if 'page' in locals():
             try:
                 await page.close()
             except:
-                pass # تجاهل إذا كانت الصفحة مغلقة بالفعل
+                pass
         if browser:
             await browser.close()
             print("تم ضمان إغلاق متصفح Playwright.")
 
-# --- دالة التحميل والإرسال والحذف ---
+# --- دوال تيليجرام (download_and_send_pdf، start، search_cmd، callback_handler، main) تبقى كما هي بدون تغيير ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()

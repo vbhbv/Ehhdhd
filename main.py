@@ -21,17 +21,16 @@ TRUSTED_DOMAINS = [
     "archive.org"
 ]
 
-# 💥 أنماط البحث المخصص (V9.2)
+# 💥 أنماط البحث المخصص (V9.3)
 SITE_SEARCH_PATTERNS = {
     "kotobati.com": "https://kotobati.com/search?q={query}",
     "archive.org": "https://archive.org/details/texts?query={query}",
 }
 
-# --- دالة البحث المخصص المُبتكرة (V9.2) ---
+# --- دالة البحث المخصص المُصححة (V9.3) ---
 async def search_site_and_extract_links(query: str):
     """
-    يقوم بالبحث مباشرة داخل المواقع الموثوقة باستخدام Playwright Locators المُحسّنة.
-    تعتمد على الفلترة النصية المتقدمة واستهداف أنماط الروابط التفصيلية لزيادة الكفاءة والدقة.
+    يقوم بالبحث مباشرة داخل المواقع الموثوقة باستخدام Playwright لسحب المحتوى وتحليل الهيكل (BeautifulSoup) لضمان الدقة (V9.3).
     """
     results = []
     
@@ -47,36 +46,40 @@ async def search_site_and_extract_links(query: str):
                     print(f"Searching {domain} at: {search_url}")
                     await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
                     
-                    # 💥 الابتكار: استخدام محدد Playwright النصي (Locator by Text)
-                    # التعبير النمطي للبحث عن أي من الكلمات المفتاحية في نص الرابط (غير حساس لحالة الأحرف)
-                    text_pattern = f"/{query}|كتاب|book/i" 
+                    # 💥 الاستراتيجية: سحب المحتوى والتحليل بـ BeautifulSoup بمحددات عامة
+                    html_content = await page.content()
+                    soup = BeautifulSoup(html_content, "html.parser")
                     
-                    # اختيار الروابط التي تحتوي على هذا النص
-                    # 'a:has-text()' يوجه Playwright لجمع العناصر المؤهلة فقط
-                    book_links_elements = await page.locator(f'a:has-text({text_pattern})').all()
+                    # 1. Kotobati: البحث عن جميع الروابط التي تحتوي على كلمة 'book' في مسارها
+                    if "kotobati.com" in domain:
+                        all_links = soup.find_all('a', href=lambda href: href and 'book' in href.lower())
                     
+                    # 2. Archive.org: البحث عن جميع الروابط التي تحتوي على كلمة 'details' في مسارها
+                    elif "archive.org" in domain:
+                        all_links = soup.find_all('a', href=lambda href: href and 'details' in href.lower())
+
+                    else:
+                        all_links = []
+                        
                     found_count = 0
-                    for element in book_links_elements:
-                        if found_count >= 3: # نكتفي بـ 3 نتائج مؤكدة من كل موقع
+                    for tag in all_links:
+                        if found_count >= 3:
                             break
                             
-                        link = await element.get_attribute('href')
-                        title = await element.text_content()
+                        link = urljoin(search_url, tag.get('href'))
+                        title = tag.text.strip()
                         
-                        link = urljoin(search_url, link)
-                        
-                        # 💥 الابتكار: التحقق من أنماط الروابط التفصيلية
+                        # شروط القبول:
                         is_detail_page = (
                             'kotobati.com/book/' in link.lower() or
                             'archive.org/details/' in link.lower()
                         )
                         
-                        # شروط القبول المُحسّنة: 
-                        # يجب أن يكون رابط صفحة تفصيلية، ويجب أن يحتوي على عنوان، ولا يكون رابط صفحة البحث
-                        if is_detail_page and title.strip() and link != search_url:
-                            # لمنع التكرار والحصول على عنوان واضح
-                            if link not in [item['link'] for item in results]:
-                                results.append({"title": title.strip(), "link": link})
+                        # الرابط يجب أن يكون رابط صفحة تفصيلية، وأن يحتوي على عنوان واضح (أكثر من 5 أحرف)، وليس صفحة البحث
+                        if is_detail_page and title and link != search_url:
+                            # فلترة النتائج المكررة أو ذات العنوان القصير جداً
+                            if link not in [item['link'] for item in results] and len(title) > 5:
+                                results.append({"title": title, "link": link})
                                 found_count += 1
 
                 except Exception as e:
@@ -292,8 +295,8 @@ async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    # 💥 استدعاء دالة البحث المخصص (V9.2)
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المخصص المُحسّن)...")
+    # 💥 استدعاء دالة البحث المخصص (V9.3)
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث المتخصص المُحسّن)...")
     
     try:
         results = await search_site_and_extract_links(query) 

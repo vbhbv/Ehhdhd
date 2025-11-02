@@ -8,8 +8,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright
 from urllib.parse import urljoin 
-# 💥 التعديل الحاسم: استخدام DDGS بدلاً من AsyncDDGS لضمان التوافق
-from duckduckgo_search import DDGS 
+from duckduckgo_search import DDGS # الاستيراد الصحيح
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -39,9 +38,13 @@ async def search_duckduckgo(query: str):
     
     results = []
     
-    # 💥 التعديل: استخدام DDGS كمدير سياق (Context Manager) لضمان العمل Async
+    # 💥 التعديل الحاسم: استخدام قائمة (list) وعمل حلقة تكرار بسيطة (for)
+    # بدلاً من async for، لأن ddgs.text() لا تعيد Async Iterator
     with DDGS(proxies=None, timeout=5) as ddgs:
-        async for r in ddgs.text(full_query, max_results=10):
+        search_results = ddgs.text(full_query, max_results=10)
+        
+        # التكرار باستخدام حلقة for بسيطة على النتائج التي تأتي كقائمة
+        for r in search_results:
             link = r.get("href")
             title = r.get("title")
             

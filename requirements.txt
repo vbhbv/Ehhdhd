@@ -3,4 +3,4 @@ aiohttp
 beautifulsoup4
 playwright
 aiofiles
-duckduckgo-search
+ddgs

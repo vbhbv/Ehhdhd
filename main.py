@@ -4,26 +4,28 @@ import tempfile
 import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright, Page 
 from urllib.parse import urljoin 
-from ddgs import DDGS # التأكد من استخدام ddgs فقط
+from ddgs import DDGS 
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+# وكيل مستخدم محمول (Mobile User Agent) لزيادة التحصين
+USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1'
+USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
+
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
-# المصادر الأقل حماية فقط
 TRUSTED_DOMAINS = [
     "kotobati.com", 
     "masaha.org", 
     "books-library.net"
 ]
 
-# --- دالة البحث الثورية (DuckDuckGo) ---
+# --- دالة البحث (DuckDuckGo - بدون تغيير) ---
 async def search_duckduckgo(query: str):
     """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
     
@@ -34,22 +36,26 @@ async def search_duckduckgo(query: str):
     
     results = []
     
-    # التأكد من استخدام DDGS بالشكل الصحيح
-    with DDGS(timeout=5) as ddgs:
-        search_results = ddgs.text(full_query, max_results=10)
-        
-        for r in search_results:
-            link = r.get("href")
-            title = r.get("title")
+    try:
+        with DDGS(timeout=5) as ddgs:
+            search_results = ddgs.text(full_query, max_results=10)
             
-            if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
-                results.append({"title": title, "link": link})
+            for r in search_results:
+                link = r.get("href")
+                title = r.get("title")
+                
+                if title and link and (any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf")):
+                    results.append({"title": title.strip(), "link": link})
+    except Exception as e:
+        print(f"DDGS search failed: {e}")
+        return []
 
     unique_links = {}
     for item in results:
         unique_links[item['link']] = item
     
     return list(unique_links.values())[:5]
+
 
 # --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة ---
 async def fallback_strategy_4_network_mine(page: Page, download_selector_css: str, link: str):
@@ -63,7 +69,8 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
     page.on("response", capture_url)
     
     try:
-        await page.locator(download_selector_css).click(timeout=15000) 
+        # محاولة النقر أولاً لتفعيل شبكة التحميل
+        await page.locator(download_selector_css).click(timeout=10000) 
         await asyncio.sleep(7) 
         
         for url in network_urls:
@@ -75,7 +82,7 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         return None 
         
     except Exception as e:
-        print(f"Network mining failed: {e}")
+        print(f"Network mining click failed: {e}")
         return None
         
     finally:
@@ -84,32 +91,70 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         except:
             pass 
 
-# --- دالة الاستخلاص المطلقة المُحسَّنة (V7.0) ---
+# --- دالة الاستخلاص المطلقة المُطوّرة (V10.1 - الاستخلاص الناري) ---
 async def get_pdf_link_from_page(link: str):
     """
-    يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF.
+    تستخدم Playwright بخيارات تحصين متقدمة (محاكاة جهاز محمول) لمحاكاة الضغط 
+    وتطبيق استراتيجيات انتظار ذكية وتنقيب شبكي عميق لاستخلاص رابط PDF.
     """
     pdf_link = None
     page_title = "book" 
     browser = None 
     
-    # 💥 التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
+    # التحقق الأول
     if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
-        print(f"Direct PDF link detected. Bypassing Playwright: {link}")
         return link, "Direct PDF"
         
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            # 💥 الابتكار 1: إطلاق المتصفح بخيارات التحصين القصوى ومحاكاة جهاز محمول
+            iphone_13 = p.devices['iPhone 13']
             
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled', 
+                    f'--user-agent={iphone_13["user_agent"]}' 
+                ]
+            )
+            # تطبيق خيارات الجهاز المحمول
+            context = await browser.new_context(**iphone_13) 
+            page = await context.new_page()
+
             await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
             
+            # قراءة العنوان الأولي
             html_content = await page.content()
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
+            # محددات عامة لأزرار التحميل
             download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
+            
+            # --- الابتكار 2: الانتظار الذكي لظهور رابط PDF في أي مكان في الصفحة ---
+            try:
+                # ننتظر ظهور رابط ينتهي بـ .pdf أو يحتوي على 'download' أو google drive
+                await page.wait_for_selector('a[href$=".pdf"], a[href*="download"], a[href*="drive.google.com"]', timeout=10000)
+                
+                # إذا ظهر، نكتشفه من HTML مباشرة
+                html_content = await page.content()
+                soup = BeautifulSoup(html_content, "html.parser")
+                
+                for a_tag in soup.find_all('a', href=True):
+                    href = urljoin(link, a_tag['href'])
+                    if href.lower().endswith('.pdf') or 'download' in href.lower() or 'drive.google.com' in href.lower():
+                        pdf_link = href
+                        print(f"PDF link found via Smart Wait: {pdf_link}")
+                        break
+                        
+            except Exception:
+                pass 
+                
+            if pdf_link:
+                return pdf_link, page_title
+
             
             # --- محاولة 1: التزامن (gather) ---
             try:
@@ -123,30 +168,17 @@ async def get_pdf_link_from_page(link: str):
                     ),
                     page.click(download_selector_css, timeout=25000) 
                 )
-                
                 pdf_link = pdf_response.url
                 
             except Exception as e:
                 print(f"Initial gather failed, attempting fallback strategies: {e}")
                 
-                # --- محاولة 2: النقر ثم التأخير ثم التنصت ---
-                try:
-                    await page.click(download_selector_css, timeout=25000) 
-                    await asyncio.sleep(4)
-                    
-                    pdf_response = await page.wait_for_response(
-                         lambda response: response.status in [200, 206, 301, 302] and (
-                            'application/pdf' in response.headers.get('content-type', '') or 
-                            response.url.lower().endswith('.pdf')
-                        ),
-                        timeout=10000 
-                    )
-                    pdf_link = pdf_response.url
-                    
-                except Exception as fallback_error:
-                    print(f"Second fallback failed, checking HTML (Strategy 3): {fallback_error}")
-                    
-                    # --- محاولة 3: فحص HTML بعد النقر والتأخير ---
+                # --- محاولة 2: التنقيب الشبكي العميق (الابتكار 3) ---
+                print("Executing Deep Network Mining (Strategy 4 - Early Attempt).")
+                pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
+                
+                if not pdf_link:
+                    # إذا فشل التنقيب المبكر، نعود لتحليل HTML القديم كخيار أخير
                     await asyncio.sleep(5) 
                     final_html_content = await page.content()
                     final_soup = BeautifulSoup(final_html_content, "html.parser")
@@ -155,26 +187,16 @@ async def get_pdf_link_from_page(link: str):
                         href = urljoin(link, a_tag['href'])
                         href_lower = href.lower()
                         
-                        if href_lower.endswith('.pdf'):
+                        if href_lower.endswith('.pdf') or 'download' in href_lower:
                             pdf_link = href
-                            print(f"PDF link found in HTML (Strategy 3): {pdf_link}")
+                            print(f"General link found in HTML (Strategy 3 - Final): {pdf_link}")
                             break
-                        
-                    if not pdf_link:
-                         for a_tag in final_soup.find_all('a', href=True):
-                            href = urljoin(link, a_tag['href'])
-                            href_lower = href.lower()
 
-                            if 'download' in href_lower or 'drive.google.com' in href_lower or 'dropbox.com' in href_lower or 'archive.org/download' in href_lower:
-                                pdf_link = href
-                                print(f"General download link found in HTML (Strategy 3): {pdf_link}")
-                                break
-                    
-                    # --- محاولة 4 (الأخيرة): التنقيب في الشبكة ---
-                    if not pdf_link:
-                         print("HTML check failed. Executing Network Mining (Strategy 4).")
-                         pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
-
+            # التأكد من العنوان النهائي
+            if not page_title:
+                 html_content = await page.content()
+                 soup = BeautifulSoup(html_content, "html.parser")
+                 page_title = soup.title.string if soup.title else "book"
 
             return pdf_link, page_title
     
@@ -183,14 +205,8 @@ async def get_pdf_link_from_page(link: str):
         raise e
     
     finally:
-        if 'page' in locals():
-            try:
-                await page.close()
-            except:
-                pass
         if browser:
             await browser.close()
-            print("تم ضمان إغلاق متصفح Playwright.")
 
 
 # --- باقي دوال تيليجرام (download_and_send_pdf، start، search_cmd، callback_handler، main) ---
@@ -235,25 +251,25 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 
 # --- دوال أوامر تيليجرام (Telegram Commands) ---
 
-async def start(update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 بوت القيامة جاهز!\n"
         "أرسل /search متبوعًا باسم الكتاب أو المؤلف."
     )
 
-async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    msg = await update.message.reply_text("🔍 أبحث عن الكتاب عبر DuckDuckGo (غير مقيد)...")
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** عبر **DuckDuckGo** (غير مقيد)...")
     
     try:
         results = await search_duckduckgo(query)
 
         if not results:
-            await msg.edit_text("❌ لم أجد نتائج موثوقة في المكتبات المختارة. حاول بكلمات مختلفة.")
+            await msg.edit_text("❌ لم أجد نتائج موثوقة في المكتبات المختارة. حاول بكلمات مختلفة أو جرب البحث مرة أخرى.")
             return
 
         buttons = []
@@ -263,7 +279,7 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         
         for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
-            source = next((d.replace('.com', '').replace('.net', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "رابط مباشر")
+            source = next((d.replace('.com', '').replace('.net', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "مباشر/عام")
             text_lines.append(f"{i+1}. {title} (المصدر: {source})")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
             
@@ -274,7 +290,7 @@ async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
          await msg.edit_text(f"⚠️ حدث خطأ أثناء البحث: {e}")
 
 
-async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -292,7 +308,7 @@ async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
             
-        await query.edit_message_text("⏳ تفعيل التنصت على نوع المحتوى (MIME Type) لعبور الحماية...")
+        await query.edit_message_text("⏳ تفعيل استراتيجية الاستخلاص الناري (V10.1)...")
         
         try:
             pdf_link, title = await get_pdf_link_from_page(link)

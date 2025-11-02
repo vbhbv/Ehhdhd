@@ -4,115 +4,54 @@ import tempfile
 import aiofiles
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes 
 from playwright.async_api import async_playwright, Page 
 from urllib.parse import urljoin 
+from ddgs import DDGS # التأكد من استخدام ddgs فقط
 
 # --- إعدادات البوت والثوابت ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# نستخدم خيارات متقدمة لوكيل المستخدم
-USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+USER_AGENT_HEADER = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
+# المصادر الأقل حماية فقط
 TRUSTED_DOMAINS = [
     "kotobati.com", 
     "masaha.org", 
-    "archive.org"
+    "books-library.net"
 ]
 
-# 💥 أنماط البحث المخصص (V9.4)
-SITE_SEARCH_PATTERNS = {
-    "kotobati.com": "https://kotobati.com/search?q={query}",
-    "archive.org": "https://archive.org/details/texts?query={query}",
-}
-
-# --- دالة البحث المخصص المُبتكرة (V9.4 - حقن JavaScript) ---
-async def search_site_and_extract_links(query: str):
-    """
-    تستخدم Playwright لتنفيذ كود JavaScript داخلي لجمع الروابط والعناوين،
-    متجاوزة بذلك مشاكل المحددات CSS الثابتة.
-    """
+# --- دالة البحث الثورية (DuckDuckGo) ---
+async def search_duckduckgo(query: str):
+    """يستخدم DuckDuckGo API للبحث عن روابط PDF مباشرة في المواقع الموثوقة."""
+    
+    sites_query = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
+    full_query = f"{query} filetype:pdf OR {sites_query}"
+    
+    print(f"Executing search query: {full_query}")
+    
     results = []
     
-    # 💥 الابتكار الجذري: كود JavaScript للبحث في DOM الصفحة
-    js_scraper = f"""
-    (function() {{
-        const query = "{query}".toLowerCase();
-        const searchPatterns = ['book', 'details']; 
-
-        // جمع جميع الروابط
-        const allLinks = Array.from(document.querySelectorAll('a[href]'));
-
-        const results = allLinks
-            .map(element => {{
-                const link = element.href;
-                const title = element.textContent.trim();
-                
-                // شروط التطابق (مسار تفصيلي أو عنوان يحتوي على نص البحث)
-                const isMatch = searchPatterns.some(pattern => link.toLowerCase().includes(pattern)) || 
-                                title.toLowerCase().includes(query) || 
-                                title.toLowerCase().includes('كتاب');
-                
-                // منع روابط الصفحة الرئيسية وروابط البحث
-                const isNotHomePage = link !== window.location.origin + '/' && 
-                                      link !== window.location.href;
-
-                // التصفية النهائية
-                if (isMatch && isNotHomePage && title.length > 5) {{
-                    return {{ title: title, link: link }}};
-                }}
-                return null;
-            }})
-            .filter(item => item !== null); 
-
-        // إرجاع قائمة فريدة من الروابط (لتجنب التكرار)
-        const uniqueLinks = Array.from(new Set(results.map(a => a.link)))
-            .map(link => results.find(a => a.link === link));
+    # التأكد من استخدام DDGS بالشكل الصحيح
+    with DDGS(timeout=5) as ddgs:
+        search_results = ddgs.text(full_query, max_results=10)
+        
+        for r in search_results:
+            link = r.get("href")
+            title = r.get("title")
             
-        return uniqueLinks.slice(0, 3); // نكتفي بأول 3 نتائج من كل موقع
-    }})()
-    """
-    
-    try:
-        async with async_playwright() as p:
-            # إطلاق المتصفح
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            if any(d in link for d in TRUSTED_DOMAINS) or link.lower().endswith(".pdf"):
+                results.append({"title": title, "link": link})
 
-            for domain, url_pattern in SITE_SEARCH_PATTERNS.items():
-                search_url = url_pattern.format(query=query)
-                
-                try:
-                    await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                    
-                    # 💥 تنفيذ كود JavaScript مباشرة
-                    site_results = await page.evaluate(js_scraper)
-                    
-                    for item in site_results:
-                         # التحقق الأخير: يجب أن يكون الرابط ضمن النطاق الموثوق
-                         if any(d in item['link'] for d in SITE_SEARCH_PATTERNS.keys()):
-                            results.append(item)
-
-                except Exception as e:
-                    print(f"Error searching {domain}: {e}")
-                    continue
-
-            await browser.close()
-            
-    except Exception as e:
-        print(f"Playwright initiation failed during search: {e}")
-    
-    # ضمان عدم تكرار الروابط والحصول على أفضل 5 نتائج
     unique_links = {}
     for item in results:
         unique_links[item['link']] = item
-        
+    
     return list(unique_links.values())[:5]
 
-
-# --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة (تبقى كما هي) ---
+# --- الإستراتيجية الرابعة المبتكرة: التنقيب في جميع روابط الشبكة ---
 async def fallback_strategy_4_network_mine(page: Page, download_selector_css: str, link: str):
     
     network_urls = set()
@@ -145,36 +84,24 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
         except:
             pass 
 
-# --- دالة الاستخلاص المطلقة (V9.4 - Playwright Hardening) ---
+# --- دالة الاستخلاص المطلقة المُحسَّنة (V7.0) ---
 async def get_pdf_link_from_page(link: str):
     """
     يستخدم Playwright لمحاكاة الضغط وينتظر استجابة شبكة تحمل ملف PDF.
-    تستخدم خيارات إطلاق متصفح محصّنة ضد آليات اكتشاف البوتات.
     """
     pdf_link = None
     page_title = "book" 
     browser = None 
     
-    # التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
-    if link.lower().endswith('.pdf') or any(d in link.lower() for d in ['archive.org/download', 'drive.google.com']):
+    # 💥 التحقق الأول: إذا كان الرابط مباشراً، لا داعي لـ Playwright
+    if link.lower().endswith('.pdf') or 'archive.org/download' in link.lower() or 'drive.google.com' in link.lower():
         print(f"Direct PDF link detected. Bypassing Playwright: {link}")
         return link, "Direct PDF"
         
     try:
         async with async_playwright() as p:
-            # 💥 إطلاق المتصفح بخيارات محاكاة جهاز حقيقي
-            browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox', 
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled', # تعطيل علامات البوت الشهيرة
-                    f'--user-agent={USER_AGENT}'
-                ]
-            )
+            browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            
-            # ملاحظة: يمكن إضافة تطبيق Stealth Mode هنا إذا تم تثبيت مكتبات playwright-extra
             
             await page.goto(link, wait_until="domcontentloaded", timeout=40000) 
             
@@ -182,7 +109,6 @@ async def get_pdf_link_from_page(link: str):
             soup = BeautifulSoup(html_content, "html.parser")
             page_title = soup.title.string if soup.title else "book"
             
-            # محددات عامة لأزرار التحميل
             download_selector_css = 'a[href*="pdf"], a.book-dl-btn, a.btn-download, button:has-text("تحميل"), a:has-text("Download"), a:has-text("ابدأ التحميل"), a:has-text("اضغط هنا للتحميل")'
             
             # --- محاولة 1: التزامن (gather) ---
@@ -248,7 +174,8 @@ async def get_pdf_link_from_page(link: str):
                     if not pdf_link:
                          print("HTML check failed. Executing Network Mining (Strategy 4).")
                          pdf_link = await fallback_strategy_4_network_mine(page, download_selector_css, link)
-                
+
+
             return pdf_link, page_title
     
     except Exception as e:
@@ -266,15 +193,14 @@ async def get_pdf_link_from_page(link: str):
             print("تم ضمان إغلاق متصفح Playwright.")
 
 
-# --- دوال تيليجرام (download_and_send_pdf) ---
+# --- باقي دوال تيليجرام (download_and_send_pdf، start، search_cmd، callback_handler، main) ---
 async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
     tmp_dir = tempfile.gettempdir()
     file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
     
     async with ClientSession() as session:
-        # استخدام وكيل المستخدم المحصن
-        async with session.get(pdf_url, headers={'User-Agent': USER_AGENT}) as resp:
+        async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
             if resp.status != 200:
                 await context.bot.send_message(
                     chat_id=chat_id, 
@@ -309,77 +235,50 @@ async def download_and_send_pdf(context, chat_id, pdf_url, title="book.pdf"):
                 
 # --- دوال أوامر تيليجرام (Telegram Commands) ---
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 بوت القيامة جاهز!\n"
         "أرسل /search متبوعًا باسم الكتاب أو المؤلف."
     )
 
-async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def search_cmd(update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
         await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
 
-    # 💥 استدعاء دالة البحث المخصص (V9.4)
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** (جاري البحث الجذري المُحسّن)...")
+    msg = await update.message.reply_text("🔍 أبحث عن الكتاب عبر DuckDuckGo (غير مقيد)...")
     
     try:
-        results = await search_site_and_extract_links(query) 
+        results = await search_duckduckgo(query)
 
         if not results:
             await msg.edit_text("❌ لم أجد نتائج موثوقة في المكتبات المختارة. حاول بكلمات مختلفة.")
             return
 
         buttons = []
-        text_lines = ["**نتائج البحث:**"]
+        text_lines = []
         
-        # تخزين جميع الروابط للاستخدام لاحقًا
         context.user_data[TEMP_LINKS_KEY] = [item.get("link") for item in results]
         
         for i, item in enumerate(results, start=0):
             title = item.get("title")[:120]
-            # تحديد المصدر بناءً على الرابط
-            source = next((d.replace('.com', '').replace('.net', '').replace('.org', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "موقع آخر")
+            source = next((d.replace('.com', '').replace('.net', '') for d in TRUSTED_DOMAINS if d in item.get('link')), "رابط مباشر")
+            text_lines.append(f"{i+1}. {title} (المصدر: {source})")
+            buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
             
-            text_lines.append(f"\n*{i+1}. {title}* (المصدر: {source})")
-            
-            # أزرار الواجهة
-            row1 = [
-                InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}"),
-                InlineKeyboardButton(f"🔗 رابط المصدر", url=item.get("link")) 
-            ]
-            buttons.append(row1)
-        
-        control_buttons = [
-            InlineKeyboardButton("🔁 بحث جديد", switch_inline_query_current_chat="/search "),
-            InlineKeyboardButton("❌ إخفاء القائمة", callback_data="hide")
-        ]
-        buttons.append(control_buttons)
-        
         reply = "\n".join(text_lines)
-        await msg.edit_text(reply, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(buttons))
+        await msg.edit_text(reply, reply_markup=InlineKeyboardMarkup(buttons))
         
     except Exception as e:
          await msg.edit_text(f"⚠️ حدث خطأ أثناء البحث: {e}")
 
 
-async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     
-    # معالج زر الإخفاء 
-    if data == "hide":
-        try:
-            await query.edit_message_text("✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.")
-        except:
-             await context.bot.send_message(
-                chat_id=query.message.chat_id,
-                text="✅ تم إخفاء قائمة البحث. ابدأ بحثًا جديدًا باستخدام /search.",
-            )
-        return
-
     if data.startswith("dl|"):
         try:
             index_str = data.split("|", 1)[1]

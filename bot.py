@@ -1,4 +1,4 @@
-# main.py (محسّن: محاكاة بعض سلوكيات JavaScript بدون متصفح)
+# main.py - Advanced extractor: focused search domains + JS endpoint probing + optional Playwright
 import os
 import re
 import asyncio
@@ -6,7 +6,8 @@ import tempfile
 import aiofiles
 import json
 import base64
-from urllib.parse import urljoin, urlparse, parse_qs
+import random
+from urllib.parse import urljoin, urlparse
 from aiohttp import ClientSession, ClientTimeout
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -15,17 +16,44 @@ from ddgs import DDGS
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+USE_BROWSER = os.getenv("USE_BROWSER", "false").lower() in ("1", "true", "yes")
 USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
 MIN_PDF_SIZE_BYTES = int(os.getenv("MIN_PDF_SIZE_BYTES", 50 * 1024))
 TEMP_LINKS_KEY = "current_search_links"
 
+# ---------------- TRUSTED DOMAINS (50) ----------------
+TRUSTED_DOMAINS = [
+"archive.org","openlibrary.org","gutenberg.org","hathitrust.org","doabooks.org",
+"arxiv.org","core.ac.uk","semanticscholar.org","researchgate.net","academia.edu",
+"ncbi.nlm.nih.gov","europeana.eu","gallica.bnf.fr","dlib.org","openedition.org",
+"jstor.org","kotobati.com","foulabook.com","ketabpedia.com","mktbtypdf.com",
+"scribd.com","noor-book.com","masaha.org","kotobpdf.com","sahm-book.com",
+"8ghrb.com","islamhouse.com","bvm.digital","biblioteca.org.ar","nla.gov.au",
+"worldcat.org","s3.amazonaws.com","dropbox.com","drive.google.com","dl.dropboxusercontent.com",
+"projectmuse.org","oapen.org","oapen-uk.org","oare.edu","oercommons.org",
+"b-ok.org","libgen.rs","libgen.is","archive.is","web.archive.org","openresearchlibrary.org",
+"bookfi.net","catalog.hathitrust.org","hdl.handle.net","research-Repository"  # placeholders for institutional repos
+]
+
+# Regex helpers
 PDF_LIKE_REGEX = re.compile(r'(https?:\/\/[^\s"\']+\.pdf(\?[^"\']*)?)', re.IGNORECASE)
 DRIVE_REGEX = re.compile(r'(https?:\/\/(?:drive\.google\.com|docs\.google\.com)[^\s"\']*)', re.IGNORECASE)
 DROPBOX_REGEX = re.compile(r'(https?:\/\/(?:www\.)?dropbox\.com[^\s"\']*)', re.IGNORECASE)
-ARCHIVE_REGEX = re.compile(r'(https?:\/\/(?:archive\.org|ia801)[^\s"\']*)', re.IGNORECASE)
+ARCHIVE_REGEX = re.compile(r'(https?:\/\/(?:archive\.org|web\.archive\.org)[^\s"\']*)', re.IGNORECASE)
 
-# ---------------- Helpers ----------------
+# Optional Playwright import (best-effort)
+_playwright_available = False
+_playwright_err = None
+if USE_BROWSER:
+    try:
+        from playwright.async_api import async_playwright, Page
+        _playwright_available = True
+    except Exception as e:
+        _playwright_err = e
+        _playwright_available = False
+
+# ---------------- Helper functions ----------------
 def absolute_url(base: str, link: str):
     try:
         return urljoin(base, link)
@@ -40,10 +68,10 @@ async def fetch_text(session: ClientSession, url: str, referer: str = None, time
         async with session.get(url, headers=headers, allow_redirects=True, timeout=ClientTimeout(total=timeout)) as resp:
             text = await resp.text(errors='ignore')
             final = str(resp.url)
-            print(f"[fetch_text] {url} -> status {resp.status}, final {final}")
+            print(f"[fetch_text] {url} -> {resp.status} final={final}")
             return resp.status, resp.headers, text, final
     except Exception as e:
-        print(f"[fetch_text] ERROR fetching {url}: {e}")
+        print(f"[fetch_text] ERROR {url}: {e}")
         return None, None, None, None
 
 async def head_check(session: ClientSession, url: str, referer: str = None, timeout=10):
@@ -52,27 +80,25 @@ async def head_check(session: ClientSession, url: str, referer: str = None, time
         headers['Referer'] = referer
     try:
         async with session.head(url, headers=headers, allow_redirects=True, timeout=ClientTimeout(total=timeout)) as head_resp:
-            content_type = head_resp.headers.get('Content-Type', '').lower()
-            content_length = int(head_resp.headers.get('Content-Length', 0) or 0)
-            print(f"[head_check] HEAD {url} -> {head_resp.status}, {content_type}, {content_length}")
-            return head_resp.status, content_type, content_length
+            ctype = head_resp.headers.get('Content-Type', '').lower()
+            clen = int(head_resp.headers.get('Content-Length', 0) or 0)
+            print(f"[head_check] HEAD {url} -> {head_resp.status} {ctype} {clen}")
+            return head_resp.status, ctype, clen
     except Exception as e:
-        # fallback to GET small-range
-        print(f"[head_check] HEAD failed for {url}: {e} — trying GET fallback")
+        print(f"[head_check] HEAD failed {url}: {e}, trying GET fallback")
         try:
             async with session.get(url, headers=headers, allow_redirects=True, timeout=ClientTimeout(total=timeout)) as resp:
-                content_type = resp.headers.get('Content-Type', '').lower()
-                content_length = int(resp.headers.get('Content-Length', 0) or 0)
-                print(f"[head_check] GET fallback {url} -> {resp.status}, {content_type}, {content_length}")
-                return resp.status, content_type, content_length
+                ctype = resp.headers.get('Content-Type', '').lower()
+                clen = int(resp.headers.get('Content-Length', 0) or 0)
+                print(f"[head_check] GET fallback {url} -> {resp.status} {ctype} {clen}")
+                return resp.status, ctype, clen
         except Exception as e2:
-            print(f"[head_check] GET fallback failed for {url}: {e2}")
+            print(f"[head_check] GET fallback failed {url}: {e2}")
             return None, None, None
 
-# ---------------- JS parsing helpers ----------------
-# extract window.location, setTimeout redirects, window.open, raw pdf urls in scripts
+# JS parsing helpers
 def extract_urls_from_js(js_text: str, base: str):
-    results = set()
+    res = set()
     if not js_text:
         return []
     patterns = [
@@ -80,169 +106,114 @@ def extract_urls_from_js(js_text: str, base: str):
         r'location\.href\s*=\s*[\'"]([^\'"]+)[\'"]',
         r'window\.open\s*\(\s*[\'"]([^\'"]+)[\'"]',
         r'setTimeout\s*\(\s*function\s*\(\)\s*\{\s*window\.location\s*=\s*[\'"]([^\'"]+)[\'"]',
-        r'setTimeout\s*\(\s*["\']location\.href\s*=\s*[\'"]([^\'"]+)[\'"]',
+        r'fetch\(\s*[\'"]([^\'"]+)[\'"]',
         r'["\'](https?:\/\/[^"\']+\.pdf[^"\']*)["\']'
     ]
     for p in patterns:
         for m in re.finditer(p, js_text, re.IGNORECASE):
             try:
-                results.add(absolute_url(base, m.group(1)))
+                res.add(absolute_url(base, m.group(1)))
             except:
                 pass
-    # find fetch/XHR endpoints that return json with url-like fields
-    # pattern: fetch('/api/getfile', { ... })
-    for m in re.finditer(r'fetch\(\s*[\'"]([^\'"]+)[\'"]', js_text, re.IGNORECASE):
-        ep = m.group(1)
-        results.add(absolute_url(base, ep))
-    # raw pdf urls inside script
     for m in PDF_LIKE_REGEX.finditer(js_text):
-        results.add(m.group(1))
-    # find base64-encoded strings that might contain urls
+        res.add(m.group(1))
+    # base64 detection (simple)
     for m in re.finditer(r'atob\([\'"]([^\'"]+)[\'"]\)', js_text, re.IGNORECASE):
         try:
-            decoded = base64.b64decode(m.group(1)).decode(errors='ignore')
-            for mm in PDF_LIKE_REGEX.finditer(decoded):
-                results.add(absolute_url(base, mm.group(1)))
+            dec = base64.b64decode(m.group(1)).decode(errors='ignore')
+            for mm in PDF_LIKE_REGEX.finditer(dec):
+                res.add(absolute_url(base, mm.group(1)))
         except Exception:
             pass
-    return list(results)
+    return list(res)
 
-# Try to call endpoints that scripts reference (GET or POST attempt)
 async def try_call_js_endpoint(session: ClientSession, endpoint: str, base_url: str, referer: str = None):
     full = absolute_url(base_url, endpoint)
     headers = USER_AGENT_HEADER.copy()
     if referer:
         headers['Referer'] = referer
-    print(f"[try_call_js_endpoint] Trying endpoint {full}")
-    # try GET
+    print(f"[try_call_js_endpoint] trying {full}")
     try:
         async with session.get(full, headers=headers, allow_redirects=True, timeout=ClientTimeout(total=12)) as resp:
             text = await resp.text(errors='ignore')
             final = str(resp.url)
-            print(f"[try_call_js_endpoint] GET {full} -> {resp.status}, {final}")
-            # scan for pdf link
             for m in PDF_LIKE_REGEX.finditer(text):
                 return absolute_url(final, m.group(1))
-            # if JSON
             try:
                 j = await resp.json(content_type=None)
-                # search for any value that looks like url/pdf
-                def scan_json(v):
+                # scan JSON for urls
+                def scan(v):
                     if isinstance(v, str):
-                        if v.lower().endswith('.pdf') or 'drive.google.com' in v or 'dropbox.com' in v:
-                            return absolute_url(final, v)
-                        # sometimes url encoded
+                        if v.lower().endswith('.pdf') or 'drive.google' in v or 'dropbox' in v:
+                            return v
                         if 'http' in v and '.pdf' in v:
                             uu = re.search(r'https?://[^\s"\']+\.pdf', v)
                             if uu:
                                 return uu.group(0)
                     if isinstance(v, dict):
                         for val in v.values():
-                            res = scan_json(val)
-                            if res:
-                                return res
+                            r = scan(val)
+                            if r:
+                                return r
                     if isinstance(v, list):
                         for item in v:
-                            res = scan_json(item)
-                            if res:
-                                return res
+                            r = scan(item)
+                            if r:
+                                return r
                     return None
-                found = scan_json(j)
+                found = scan(j)
                 if found:
-                    return found
+                    return absolute_url(final, found)
             except Exception:
                 pass
     except Exception as e:
         print(f"[try_call_js_endpoint] GET failed {full}: {e}")
-
     # try POST minimal
     try:
         async with session.post(full, headers=headers, data={}, allow_redirects=True, timeout=ClientTimeout(total=12)) as resp:
-            text = await resp.text(errors='ignore')
-            final = str(resp.url)
-            for m in PDF_LIKE_REGEX.finditer(text):
-                return absolute_url(final, m.group(1))
+            t = await resp.text(errors='ignore')
+            for m in PDF_LIKE_REGEX.finditer(t):
+                return absolute_url(str(resp.url), m.group(1))
     except Exception as e:
         print(f"[try_call_js_endpoint] POST failed {full}: {e}")
-
     return None
 
-# ---------------- HTML extractor (improved) ----------------
+# ---------------- HTML extractor ----------------
 async def extract_pdf_candidate_from_html(html: str, base_url: str):
-    candidates = []
     soup = BeautifulSoup(html, "html.parser")
+    candidates = []
 
-    # 1) <a href> direct patterns
+    # links and download patterns
     for a in soup.find_all('a', href=True):
         href = a['href'].strip()
         full = absolute_url(base_url, href)
         low = full.lower()
+        text = (a.get_text() or '').strip().lower()
         if low.endswith('.pdf') or 'drive.google.com' in low or 'dropbox.com' in low or 'archive.org/download' in low:
             candidates.append(full)
-        if 'download' in low and ('/file' in low or low.endswith('/download') or 'dl=' in low or '/downloading/' in low):
+        if '/book/downloading/' in low or '/downloading/' in low or '/download/' in low or 'dl=' in low:
             candidates.append(full)
-        # look for links whose visible text indicates download
-        text = (a.get_text() or '').strip().lower()
-        if any(k in text for k in ("تحميل", "download", "download book", "تحميل الكتاب")):
+        if any(k in text for k in ('تحميل', 'download', 'download book', 'تحميل الكتاب')):
             candidates.append(full)
 
-    # 2) data-* attributes
+    # data-* attributes
     for tag in soup.find_all(True, attrs=True):
-        for attr in ('data-href', 'data-url', 'data-download', 'data-link', 'data-file'):
+        for attr in ('data-href','data-url','data-download','data-link','data-file'):
             if tag.has_attr(attr):
                 candidates.append(absolute_url(base_url, tag[attr]))
 
-    # 3) onclick handlers
+    # onclick handlers
     for tag in soup.find_all(True, onclick=True):
-        onclick = tag['onclick']
-        for url in extract_urls_from_js(onclick, base_url):
+        for url in extract_urls_from_js(tag['onclick'], base_url):
             candidates.append(url)
 
-    # 4) meta refresh
-    m = soup.find('meta', attrs={'http-equiv': re.compile(r'refresh', re.I)})
-    if m and m.get('content'):
-        content = m['content']
-        parts = content.split(';')
-        if len(parts) >= 2 and 'url=' in parts[1].lower():
-            url_part = parts[1].split('=', 1)[1].strip(' "\'')
-            candidates.append(absolute_url(base_url, url_part))
-
-    # 5) inline scripts
+    # inline scripts
     for script in soup.find_all('script'):
-        script_text = script.string or ''
-        for url in extract_urls_from_js(script_text, base_url):
+        s = script.string or ''
+        for url in extract_urls_from_js(s, base_url):
             candidates.append(url)
-        # try to find JSON objects inside scripts (var data = {...})
-        for jm in re.finditer(r'var\s+([a-zA-Z0-9_]+)\s*=\s*(\{[\s\S]{10,2000}?\});', script_text):
-            try:
-                jsobj = jm.group(2)
-                # try to convert to valid JSON (simple replacements)
-                json_text = re.sub(r'(\w+):', r'"\1":', jsobj)  # crude
-                parsed = json.loads(json_text)
-                # scan parsed for pdf links
-                def scan(v):
-                    if isinstance(v, str):
-                        if v.lower().endswith('.pdf') or 'drive.google' in v or 'dropbox' in v:
-                            return v
-                    if isinstance(v, dict):
-                        for val in v.values():
-                            res = scan(val)
-                            if res:
-                                return res
-                    if isinstance(v, list):
-                        for item in v:
-                            res = scan(item)
-                            if res:
-                                return res
-                    return None
-                found = scan(parsed)
-                if found:
-                    candidates.append(absolute_url(base_url, found))
-            except Exception:
-                pass
 
-    # 6) forms (we will try to submit later)
-    # return unique preserving order
+    # forms (we'll try simple submission logic later)
     seen = set()
     unique = []
     for c in candidates:
@@ -251,126 +222,190 @@ async def extract_pdf_candidate_from_html(html: str, base_url: str):
             unique.append(c)
     return unique
 
-# ---------------- High-level: simulate wait/follow endpoints ----------------
-async def get_pdf_link_no_browser(start_url: str, max_wait_seconds=30):
+# ---------------- No-browser extraction (with JS endpoint probing + polling) ----------------
+async def get_pdf_link_no_browser(start_url: str, max_wait_seconds=35):
     async with ClientSession() as session:
         referer = start_url
         low = start_url.lower()
-        if low.endswith('.pdf') or 'drive.google.com' in low or 'dropbox.com' in low or 'archive.org' in low:
+        if low.endswith('.pdf') or 'archive.org/download' in low or 'drive.google.com' in low or 'dropbox.com' in low:
             return start_url, start_url
 
         status, headers, text, final_url = await fetch_text(session, start_url, referer=start_url, timeout=15)
         if not text:
             return None, None
 
-        # 1. extract candidates from HTML and inline JS
         candidates = await extract_pdf_candidate_from_html(text, final_url)
-        print(f"[get_pdf_link_no_browser] initial candidates: {candidates}")
+        print(f"[no_browser] initial candidates: {candidates}")
 
-        # 2. attempt to call JS endpoints found in inline scripts (fetch/XHR)
-        # extract endpoints from scripts quickly
-        script_endpoints = set()
+        # scan for fetch/XHR endpoints in scripts
+        endpoints = set()
         for m in re.finditer(r'fetch\(\s*[\'"]([^\'"]+)[\'"]', text, re.IGNORECASE):
-            script_endpoints.add(m.group(1))
+            endpoints.add(m.group(1))
         for m in re.finditer(r'xhr\.open\(\s*[\'"](?:GET|POST)[\'"]\s*,\s*[\'"]([^\'"]+)[\'"]', text, re.IGNORECASE):
-            script_endpoints.add(m.group(1))
-        for ep in script_endpoints:
+            endpoints.add(m.group(1))
+
+        # call endpoints
+        for ep in endpoints:
             found = await try_call_js_endpoint(session, ep, final_url, referer=referer)
             if found:
-                print(f"[get_pdf_link_no_browser] found via endpoint {ep}: {found}")
+                print(f"[no_browser] endpoint returned pdf: {found}")
                 return found, final_url
 
-        # 3. try direct candidate checks via HEAD
-        for candidate in candidates:
-            st, ctype, clen = await head_check(session, candidate, referer=final_url)
+        # try HEAD on initial candidates
+        for c in candidates:
+            st, ctype, clen = await head_check(session, c, referer=final_url)
             if ctype and ('pdf' in ctype or 'octet-stream' in ctype) and (clen is None or clen >= MIN_PDF_SIZE_BYTES):
-                print(f"[get_pdf_link_no_browser] candidate passed HEAD: {candidate}")
-                return candidate, final_url
+                return c, final_url
 
-        # 4. try forms (submit simple) and re-scan results
+        # try simple form submits (heuristic)
         soup = BeautifulSoup(text, "html.parser")
         for form in soup.find_all('form'):
-            method = (form.get('method') or 'get').lower()
-            action = form.get('action') or final_url
-            # heuristic: only try forms that mention download/file
             form_text = str(form).lower()
-            if any(k in form_text for k in ("download", "getfile", "file")):
-                st, hd, tx, fu = await try_submit_form(session, form, final_url, referer=referer)
-                if tx:
-                    extra = await extract_pdf_candidate_from_html(tx, fu or final_url)
-                    for e in extra:
-                        st2, ctype2, clen2 = await head_check(session, e, referer=fu or final_url)
-                        if ctype2 and ('pdf' in ctype2 or 'octet-stream' in ctype2):
-                            return e, fu or final_url
+            if any(k in form_text for k in ('download','get','file','submit')):
+                # prepare basic data
+                data = {}
+                for inp in form.find_all('input'):
+                    if inp.get('name'):
+                        data[inp.get('name')] = inp.get('value','')
+                action = form.get('action') or final_url
+                method = (form.get('method') or 'get').lower()
+                target = absolute_url(final_url, action)
+                try:
+                    if method == 'post':
+                        async with session.post(target, data=data, headers=USER_AGENT_HEADER, allow_redirects=True, timeout=ClientTimeout(total=15)) as resp:
+                            tx = await resp.text(errors='ignore')
+                            for m in PDF_LIKE_REGEX.finditer(tx):
+                                return absolute_url(str(resp.url), m.group(1)), final_url
+                    else:
+                        async with session.get(target, params=data, headers=USER_AGENT_HEADER, allow_redirects=True, timeout=ClientTimeout(total=15)) as resp:
+                            tx = await resp.text(errors='ignore')
+                            for m in PDF_LIKE_REGEX.finditer(tx):
+                                return absolute_url(str(resp.url), m.group(1)), final_url
+                except Exception as e:
+                    print(f"[no_browser] form submit failed: {e}")
 
-        # 5. polling to simulate waiting (e.g., setTimeout redirect or countdown pages)
-        wait_interval = 4
+        # polling loop to simulate waiting/countdown or later load
+        wait_interval = 5
         attempts = max(1, max_wait_seconds // wait_interval)
         for i in range(attempts):
-            await asyncio.sleep(wait_interval)
-            print(f"[get_pdf_link_no_browser] polling attempt {i+1}/{attempts}")
+            await asyncio.sleep(wait_interval + random.uniform(0,2))
+            print(f"[no_browser] polling attempt {i+1}/{attempts}")
             status, headers, text, final_url = await fetch_text(session, start_url, referer=referer, timeout=15)
             if not text:
                 continue
-            # re-extract candidates
             candidates = await extract_pdf_candidate_from_html(text, final_url)
-            for candidate in candidates:
-                st, ctype, clen = await head_check(session, candidate, referer=final_url)
+            for c in candidates:
+                st, ctype, clen = await head_check(session, c, referer=final_url)
                 if ctype and ('pdf' in ctype or 'octet-stream' in ctype) and (clen is None or clen >= MIN_PDF_SIZE_BYTES):
-                    print(f"[get_pdf_link_no_browser] found during polling: {candidate}")
-                    return candidate, final_url
-            # also try js endpoints again
+                    return c, final_url
+            # try endpoints again
             for m in re.finditer(r'fetch\(\s*[\'"]([^\'"]+)[\'"]', text, re.IGNORECASE):
-                ep = m.group(1)
-                found = await try_call_js_endpoint(session, ep, final_url, referer=referer)
+                found = await try_call_js_endpoint(session, m.group(1), final_url, referer=referer)
                 if found:
                     return found, final_url
 
-        # 6. last resort: follow redirects history
+        # redirect history fallback
         try:
             async with session.get(start_url, headers=USER_AGENT_HEADER, allow_redirects=True, timeout=ClientTimeout(total=15)) as resp:
                 final = str(resp.url)
                 if final and final.lower().endswith('.pdf'):
                     st, ctype, clen = await head_check(session, final, referer=start_url)
                     if ctype and ('pdf' in ctype or 'octet-stream' in ctype):
-                        print(f"[get_pdf_link_no_browser] final redirect is pdf: {final}")
                         return final, start_url
         except Exception:
             pass
 
-        print("[get_pdf_link_no_browser] no pdf found")
         return None, None
 
-# helper: submit forms (used above)
-async def try_submit_form(session: ClientSession, form, base_url: str, referer: str = None):
-    action = form.get('action') or base_url
-    method = (form.get('method') or 'get').lower()
-    data = {}
-    for inp in form.find_all('input'):
-        name = inp.get('name')
-        if not name:
-            continue
-        val = inp.get('value', '')
-        data[name] = val
-    target = absolute_url(base_url, action)
-    headers = USER_AGENT_HEADER.copy()
-    if referer:
-        headers['Referer'] = referer
-    print(f"[try_submit_form] submitting form to {target} method={method} data_keys={list(data.keys())}")
+# ---------------- Playwright extractor (if available) ----------------
+async def get_pdf_link_with_browser(link: str, timeout_ms: int = 45000):
     try:
-        if method == 'post':
-            async with session.post(target, headers=headers, data=data, allow_redirects=True, timeout=ClientTimeout(total=15)) as resp:
-                text = await resp.text(errors='ignore')
-                return resp.status, resp.headers, text, str(resp.url)
-        else:
-            async with session.get(target, headers=headers, params=data, allow_redirects=True, timeout=ClientTimeout(total=15)) as resp:
-                text = await resp.text(errors='ignore')
-                return resp.status, resp.headers, text, str(resp.url)
-    except Exception as e:
-        print(f"[try_submit_form] failed: {e}")
-        return None, None, None, None
+        # best-effort install attempt (no-op if already installed)
+        try:
+            import subprocess
+            subprocess.run(["playwright", "install", "chromium"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
-# ---------------- Download/send ----------------
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox','--disable-dev-shm-usage'])
+            context = await browser.new_context(user_agent=USER_AGENT, viewport={'width':1280,'height':720})
+            # anti detection scripts
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+                window.navigator.chrome = { runtime: {} };
+            """)
+            page = await context.new_page()
+            network_urls = set()
+
+            def on_response(resp):
+                try:
+                    if resp.status in (200,206) or resp.status >=300:
+                        network_urls.add(resp.url)
+                except:
+                    pass
+
+            page.on("response", on_response)
+
+            try:
+                await page.goto(link, wait_until="networkidle", timeout=timeout_ms)
+            except Exception as e:
+                print(f"[playwright] goto failed: {e}")
+
+            # attempt clicks for common selectors
+            selectors = ['a[href*="pdf"]', 'a.btn-download', 'a[href*="download"]', 'button:has-text("تحميل")', 'button:has-text("download")']
+            for sel in selectors:
+                try:
+                    loc = page.locator(sel)
+                    if await loc.count() > 0:
+                        await loc.first.click(timeout=5000, force=True)
+                        await asyncio.sleep(random.uniform(1.5,3.5))
+                except Exception:
+                    pass
+
+            # wait for network capture
+            await asyncio.sleep(3)
+            # inspect network URLs
+            for u in network_urls:
+                if u.lower().endswith('.pdf') or 'drive.google.com' in u or 'dropbox.com' in u:
+                    await browser.close()
+                    return u, link
+
+            # fallback: scrape HTML and frames
+            content = await page.content()
+            soup = BeautifulSoup(content, "html.parser")
+            for a in soup.find_all('a', href=True):
+                href = absolute_url(link, a['href'])
+                if href.lower().endswith('.pdf') or '/book/downloading/' in href.lower():
+                    await browser.close()
+                    return href, link
+
+            await browser.close()
+            return None, None
+    except Exception as e:
+        print(f"[playwright] critical error: {e}")
+        return None, None
+
+# ---------------- Unified getter ----------------
+async def get_pdf_link(link: str, prefer_browser: bool = False):
+    # prefer_browser tries Playwright first if available
+    if prefer_browser and _playwright_available:
+        pdf, ref = await get_pdf_link_with_browser(link)
+        if pdf:
+            return pdf, ref
+    # try no-browser smart method
+    pdf, ref = await get_pdf_link_no_browser(link, max_wait_seconds=35)
+    if pdf:
+        return pdf, ref
+    # last resort: try browser if available
+    if _playwright_available and not prefer_browser:
+        pdf, ref = await get_pdf_link_with_browser(link)
+        return pdf, ref
+    return None, None
+
+# ---------------- download/send ----------------
 async def download_and_send_pdf(context, chat_id, source, title="book.pdf", referer_link=None):
     pdf_url = source
     download_headers = USER_AGENT_HEADER.copy()
@@ -381,13 +416,13 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", refe
         try:
             st, ctype, clen = await head_check(session, pdf_url, referer=referer_link)
             if not ctype or ('pdf' not in ctype and 'octet-stream' not in ctype):
-                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ فشل: الرابط لا يبدو PDF ({ctype}).")
+                await context.bot.send_message(chat_id=chat_id, text=f"⚠️ الفشل: الرابط لا يبدو PDF ({ctype}).")
                 return
             if clen is not None and clen < MIN_PDF_SIZE_BYTES:
-                await context.bot.send_message(chat_id=chat_id, text="⚠️ فشل: الملف صغير جدًا.")
+                await context.bot.send_message(chat_id=chat_id, text="⚠️ الفشل: الملف صغير جدًا.")
                 return
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء التحقق من الملف: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء التحقق: {e}")
             return
 
         tmp_dir = tempfile.gettempdir()
@@ -403,7 +438,7 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", refe
                 async with aiofiles.open(file_path, "wb") as f:
                     await f.write(content)
         except Exception as e:
-            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء تنزيل الملف: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=f"⚠️ خطأ أثناء التنزيل: {e}")
             return
 
     try:
@@ -421,36 +456,37 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", refe
 
 # ---------------- Telegram handlers ----------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📚 بوت التحميل - محسن لاستخلاص روابط (بدون متصفح). استخدم /search أو أرسل رابط.")
+    await update.message.reply_text("📚 بوت البحث في مكتبات الكتب — أرسل /search <اسم الكتاب> أو استخدم النتائج.")
 
 async def search_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args).strip()
     if not query:
-        await update.message.reply_text("استخدم: /search اسم الكتاب أو رابط.")
+        await update.message.reply_text("استخدم: /search اسم الكتاب أو المؤلف")
         return
-    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}** ...")
+    msg = await update.message.reply_text(f"🔍 أبحث عن **{query}**...")
     try:
         results = []
-        with DDGS(timeout=5) as ddgs:
-            full_q = f"{query} filetype:pdf"
-            for r in ddgs.text(full_q, max_results=10):
+        with DDGS(timeout=6) as ddgs:
+            q = " OR ".join([f"site:{d}" for d in TRUSTED_DOMAINS])
+            full_q = f"{query} filetype:pdf OR {q}"
+            for r in ddgs.text(full_q, max_results=15):
                 link = r.get('href')
                 title = r.get('title') or link
                 if link and title:
                     results.append({"title": title.strip(), "link": link})
-        unique = {}
+        # dedupe
+        uniq = {}
         for it in results:
-            unique[it['link']] = it
-        results = list(unique.values())[:6]
+            uniq[it['link']] = it
+        results = list(uniq.values())[:8]
         if not results:
-            await msg.edit_text("❌ لم أجد نتائج موثوقة.")
+            await msg.edit_text("❌ لم أجد نتائج موثوقة في مصادر الكتب الموثوقة.")
             return
-
         context.user_data[TEMP_LINKS_KEY] = [it['link'] for it in results]
         buttons = []
         lines = []
         for i, it in enumerate(results):
-            lines.append(f"{i+1}. {it['title'][:100]}")
+            lines.append(f"{i+1}. {it['title'][:120]}")
             buttons.append([InlineKeyboardButton(f"📥 تحميل {i+1}", callback_data=f"dl|{i}")])
         await msg.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
@@ -463,24 +499,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data.startswith("dl|"):
         return
     try:
-        idx = int(data.split("|", 1)[1])
+        idx = int(data.split("|",1)[1])
         link = context.user_data[TEMP_LINKS_KEY][idx]
     except Exception:
         await query.message.reply_text("⚠️ خطأ: الرابط غير صالح.")
         return
 
-    await query.edit_message_text("⏳ محاولة استخلاص رابط التحميل (محاولة ذكية بدون متصفح)... يرجى الانتظار.")
-    pdf_link, referer = await get_pdf_link_no_browser(link, max_wait_seconds=30)
+    await query.edit_message_text("⏳ جارى استخلاص رابط PDF — سأحاول قطعياً (مع استراتيجيات متعددة)...")
+    prefer_browser = USE_BROWSER and _playwright_available
+    if USE_BROWSER and not _playwright_available:
+        print("[WARN] USE_BROWSER=true لكن Playwright غير مثبت:", _playwright_err)
+
+    pdf_link, referer = await get_pdf_link(link, prefer_browser=prefer_browser)
     if pdf_link:
         await download_and_send_pdf(context, query.message.chat_id, pdf_link, title="book", referer_link=referer)
     else:
-        await context.bot.send_message(chat_id=query.message.chat_id, text=f"📄 لم أتمكن من استخلاص رابط PDF من المصدر: {link}\n(إذا كان الموقع يعتمد على جافاسكربت معقد أو CAPTCHA فالمتصفح الحقيقي ضروري.)")
+        text = f"📄 لم أتمكن من استخلاص رابط PDF من المصدر: {link}\n"
+        if USE_BROWSER and not _playwright_available:
+            text += "ملاحظة: طلبت وضع المتصفح لكن Playwright غير مُثبت في البيئة."
+        else:
+            text += "ملاحظة: إن كانت الصفحة تعتمد على جافاسكربت معقد أو CAPTCHA فالطريقة المثلى هي تشغيل المتصفح (Playwright)."
+        await context.bot.send_message(chat_id=query.message.chat_id, text=text)
 
 # ---------------- Main ----------------
 def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN مفقود في المتغيرات البيئية.")
-    print("Starting enhanced no-browser bot.")
+    print("Bot starting. USE_BROWSER=", USE_BROWSER, "playwright_available=", _playwright_available)
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("search", search_cmd))

@@ -1,17 +1,21 @@
 import joblib
 import pandas as pd
 import numpy as np
-# ... (بقية الاستيرادات: asyncio, playwright, aiohttp, re, BeautifulSoup, List, Dict, Optional) ...
+import asyncio
+import re
+from typing import List, Dict, Any, Optional
+# تأكد من تثبيت هذه المكتبات في requirements.txt:
+from bs4 import BeautifulSoup 
+from playwright.async_api import async_playwright 
 
 # -----------------------------------------------------
 #                وحدة الذكاء الاصطناعي (AI Selector)
 # -----------------------------------------------------
 
-# 🚨 الإضافة 1: دالة هندسة الميزات للاستدلال (Inference)
+# 🚨 دالة هندسة الميزات للاستدلال (Inference) - 8 ميزات
 def feature_engineer_for_inference(record: dict) -> list:
     """تستخرج الميزات الثمانية بنفس الترتيب الذي تم التدريب عليه."""
     
-    # ضمان التعامل مع القيم المفقودة
     text_content = record.get('text_content', '')
     tag_type = record.get('tag_type', '')
     css_class = record.get('css_class', '')
@@ -23,53 +27,38 @@ def feature_engineer_for_inference(record: dict) -> list:
 
     features = []
     
-    # 1. feat_has_download_word
-    features.append(1.0 if ('تحميل' in text_content or 'download' in text_content.lower()) else 0.0)
-    
-    # 2. feat_is_anchor
-    features.append(1.0 if tag_type == 'a' else 0.0)
-    
-    # 3. feat_class_length
-    features.append(float(len(css_class.split()) if css_class else 0.0))
-    
-    # 4. feat_structural_proximity
-    features.append(float(is_near_pdf_keyword))
-    
-    # 5. feat_is_file_link
-    features.append(1.0 if (href and (href.endswith('.pdf') or href.endswith('.zip') or href.endswith('.epub'))) else 0.0)
-    
-    # 6. feat_selector_complexity
-    features.append(float(css_selector.count('.') + css_selector.count('#') if css_selector else 0.0))
-    
-    # 7. feat_depth_v2
-    features.append(float(feat_depth))
-    
-    # 8. feat_is_in_main_section_v2
-    features.append(float(feat_is_in_main_section))
+    # الـ 8 ميزات بالترتيب:
+    features.append(1.0 if ('تحميل' in text_content or 'download' in text_content.lower()) else 0.0) # 1
+    features.append(1.0 if tag_type == 'a' else 0.0) # 2
+    features.append(float(len(css_class.split()) if css_class else 0.0)) # 3
+    features.append(float(is_near_pdf_keyword)) # 4
+    features.append(1.0 if (href and (href.endswith('.pdf') or href.endswith('.zip') or href.endswith('.epub'))) else 0.0) # 5
+    features.append(float(css_selector.count('.') + css_selector.count('#') if css_selector else 0.0)) # 6
+    features.append(float(feat_depth)) # 7
+    features.append(float(feat_is_in_main_section)) # 8
     
     return features
 
 
-# 🚨 الإضافة 2: تحميل النموذج
+# 🚨 تحميل النموذج (AI_SELECTOR_MODEL)
 try:
     AI_SELECTOR_MODEL = joblib.load('selector_classifier_model.pkl')
     print("✅ وحدة MiningEngine: تم تحميل نموذج الذكاء الاصطناعي بنجاح.")
 except Exception as e:
     AI_SELECTOR_MODEL = None
-    print(f"❌ وحدة MiningEngine: فشل تحميل نموذج الذكاء الاصطناعي. سيتم استخدام المنطق اليدوي (إذا وجد). الخطأ: {e}")
+    # تأكد من رفع ملف selector_classifier_model.pkl إلى المستودع!
+    print(f"❌ وحدة MiningEngine: فشل تحميل نموذج الذكاء الاصطناعي. الخطأ: {e}")
 
 # -----------------------------------------------------
 #                   كلاس MiningEngine
 # -----------------------------------------------------
 
 class MiningEngine:
-    # ... (بقية الكود) ...
     
     @staticmethod
     async def get_pdf_link_and_headers(page: Any) -> Optional[Dict[str, Any]]:
-        # ⚠️ التحقق من تحميل النموذج أولاً
+        # التحقق من تحميل النموذج
         if AI_SELECTOR_MODEL is None:
-            # يمكن وضع منطق بديل أو إرجاع None إذا كان الذكاء الاصطناعي مطلوباً
             return None 
 
         html_content = await page.content()
@@ -77,23 +66,20 @@ class MiningEngine:
         
         best_selector = None
         max_probability = 0.0
-        
         candidates = []
 
-        # 1. جمع المرشحين وتوليد الميزات الهيكلية في وقت التشغيل
+        # 1. جمع المرشحين وتوليد الميزات الهيكلية
         for tag in soup.find_all(['a', 'button']):
             href = tag.get('href')
             if not href or href.startswith('#'):
                 continue
 
-            # حساب العمق (feat_depth)
+            # حساب العمق (feat_depth) وتحديد القسم الرئيسي (feat_is_in_main_section)
             parent_count = 0
             current_tag = tag
             while current_tag.parent is not None and current_tag.parent.name not in ['[document]', 'html']:
                 parent_count += 1
                 current_tag = current_tag.parent
-            
-            # تحديد القسم الرئيسي (feat_is_in_main_section)
             is_in_main = 1 if tag.find_parent(['main', 'article']) else 0
             
             record = {
@@ -112,13 +98,10 @@ class MiningEngine:
             return None
 
         # 2. تقييم المرشحين باستخدام الذكاء الاصطناعي
-        print("🧠 تقييم المرشحين باستخدام نموذج الذكاء الاصطناعي...")
         
         for record in candidates:
             features = feature_engineer_for_inference(record)
-            
-            # التنبؤ بالاحتمالية
-            # يجب استخدام np.array لتحويل القائمة إلى تنسيق مقبول للنموذج
+            # التنبؤ بالاحتمالية للتصنيف 1 (الهدف)
             probability = AI_SELECTOR_MODEL.predict_proba(np.array([features]))[0][1] 
             
             if probability > max_probability:
@@ -127,13 +110,58 @@ class MiningEngine:
         
         CONFIDENCE_THRESHOLD = 0.70 
         
+        # 3. القرار النهائي
         if max_probability < CONFIDENCE_THRESHOLD:
-            print(f"⚠️ تنبيه: أفضل احتمال ({max_probability:.4f}) أقل من 70%. سيتم إيقاف الاستخلاص.")
+            print(f"⚠️ تنبيه: أفضل احتمال ({max_probability:.4f}) أقل من 70%.")
             return None
         
-        print(f"✅ تم اختيار المحدد بالاحتمالية: {best_selector} ({max_probability:.4f})")
+        print(f"✅ تم اختيار المحدد: {best_selector} ({max_probability:.4f})")
         
-        # ... (بقية منطق النقر ومراقبة الشبكة) ...
+        # ... (هنا يمكنك وضع منطق النقر ومراقبة الشبكة باستخدام best_selector) ...
         return {"selector": best_selector, "confidence": max_probability}
 
-# ... (بقية الكلاسات والدوال) ...
+
+# -----------------------------------------------------
+#                   منطق التشغيل الرئيسي (Main Execution)
+# -----------------------------------------------------
+
+async def run_mining_task(url: str):
+    """دالة لفتح المتصفح وتنفيذ مهمة الاستخلاص."""
+    print(f"\n--- بدء مهمة الاستخلاص للرابط: {url} ---")
+    
+    async with async_playwright() as p:
+        # يرجى اختيار المتصفح المناسب للنشر (Chromium هو الأكثر شيوعاً)
+        browser = await p.chromium.launch() 
+        page = await browser.new_page()
+        
+        # الانتقال إلى الرابط
+        try:
+            await page.goto(url, timeout=60000)
+            print("✅ تم تحميل الصفحة.")
+        except Exception as e:
+            print(f"❌ فشل تحميل الصفحة: {e}")
+            await browser.close()
+            return
+
+        # تنفيذ منطق الاستخلاص
+        result = await MiningEngine.get_pdf_link_and_headers(page)
+        
+        if result:
+            print("\n🌟 النتيجة النهائية:")
+            print(f"المُحدِّد الأفضل: {result['selector']}")
+            print(f"درجة الثقة: {result['confidence']:.4f}")
+            # ... (هنا يمكن أن تضع منطق النقر الفعلي باستخدام Playwright) ...
+        else:
+            print("\n❌ لم يتم العثور على محدد تحميل موثوق.")
+
+        await browser.close()
+        print("--- انتهت المهمة ---")
+
+# 🚨 تعديل هذا الجزء لبدء تشغيل البرنامج 
+if __name__ == "__main__":
+    # ضع هنا الرابط الذي تريد اختباره أو استخلاص البيانات منه
+    TEST_URL = "https://books-library.website/" 
+    try:
+        asyncio.run(run_mining_task(TEST_URL))
+    except KeyboardInterrupt:
+        print("تم إيقاف البرنامج يدوياً.")

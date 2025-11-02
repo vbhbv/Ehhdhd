@@ -1,4 +1,3 @@
-Use a slim Python base
 FROM python:3.11-slim
 
 # Install system deps needed by Playwright/Chromium and common tools

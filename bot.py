@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import aiofiles
 import random 
-import json # New: For context data
+import json 
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,10 +20,18 @@ USER_AGENT_HEADER = {'User-Agent': USER_AGENT}
 
 MIN_PDF_SIZE_BYTES = 50 * 1024 
 TEMP_LINKS_KEY = "current_search_links" 
+
+# 🎯 V15.3: قائمة المواقع الموسعة للبحث 
 TRUSTED_DOMAINS = [
-    "kotobati.com", 
-    "masaha.org", 
-    "books-library.net"
+    "ketabpedia.com",   
+    "scribd.com",       
+    "sahm-book.com",    
+    "8ghrb.com",        
+    "mktbtypdf.com",    
+    "foulabook.com",    
+    "archive.org",      
+    "kotobati.com",     
+    "masaha.org"        
 ]
 
 # --- دالة البحث (DDGS - بدون تغيير) ---
@@ -90,7 +98,7 @@ async def fallback_strategy_4_network_mine(page: Page, download_selector_css: st
             pass 
 
 # ----------------------------------------------------------------------
-# --- دالة الاستخلاص المطلقة المُطوّرة (V15.0 - التحسين الهندسي) ---
+# --- دالة الاستخلاص المطلقة المُطوّرة (V15.3 - التحسين الهندسي) ---
 # ----------------------------------------------------------------------
 async def get_pdf_link_from_page(link: str):
     """
@@ -107,7 +115,7 @@ async def get_pdf_link_from_page(link: str):
         
     try:
         async with async_playwright() as p:
-            # 💥 (V15.0) إطلاق متصفح Chrome بتحسينات الذاكرة والإخفاء الهندسي
+            # 💥 (V15.3) إطلاق متصفح Chrome بتحسينات الذاكرة والإخفاء الهندسي
             browser = await p.chromium.launch(
                 headless="new", 
                 args=[
@@ -126,7 +134,7 @@ async def get_pdf_link_from_page(link: str):
             
             # 🛡️ الإخفاء الهندسي المتقدم (Anti-Detection Script)
             await context.add_init_script("""
-                // V15.0: إخفاء خصائص متقدمة
+                // V15.3: إخفاء خصائص متقدمة
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 });
@@ -233,7 +241,7 @@ async def get_pdf_link_from_page(link: str):
                 page.on('download', capture_download)
 
                 try:
-                    # 💥 V15.0: محاولة النقر المزدوج لزيادة الموثوقية
+                    # 💥 V15.3: محاولة النقر المزدوج لزيادة الموثوقية
                     await page.locator(download_selector_css).scroll_into_view_if_needed(timeout=5000)
                     await page.locator(download_selector_css).click(timeout=15000, force=True)
                     await asyncio.sleep(5) 
@@ -299,7 +307,7 @@ async def get_pdf_link_from_page(link: str):
 
 
 # ----------------------------------------------------------------------
-# --- دالة التحميل والإرسال (V15.0 - التحقق الموثوق) ---
+# --- دالة التحميل والإرسال (V15.3 - التحقق الموثوق وتصحيح المسار) ---
 # ----------------------------------------------------------------------
 async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_local_path=False):
     """تحميل الملف، إرساله إلى المستخدم، ثم حذفه من القرص الصلب."""
@@ -310,7 +318,7 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_l
         pdf_url = source
         
         async with ClientSession() as session:
-            # ✅ V15.0: التحقق الموثوق من الرأس قبل التحميل
+            # ✅ V15.3: التحقق الموثوق من الرأس قبل التحميل
             try:
                 async with session.head(pdf_url, headers=USER_AGENT_HEADER, allow_redirects=True, timeout=10) as head_resp:
                     # التحقق من أن الرابط ليس صفحة HTML
@@ -330,7 +338,11 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_l
             
             # المتابعة بعملية التحميل الفعلية
             tmp_dir = tempfile.gettempdir()
-            file_path = os.path.join(tmp_dir, title.replace("/", "_")[:40] + ".pdf")
+            
+            # 🛠️ تصحيح الخطأ في بناء الجملة (SyntaxError)
+            # تم تقسيم بناء اسم الملف لتجنب استخدام الـ backslash (/) في الـ f-string ضمن تعبير معقد.
+            safe_title = title.replace("/", "_")[:40]
+            file_path = os.path.join(tmp_dir, f"{safe_title}.pdf")
 
             async with session.get(pdf_url, headers=USER_AGENT_HEADER) as resp:
                 if resp.status != 200:
@@ -353,7 +365,7 @@ async def download_and_send_pdf(context, chat_id, source, title="book.pdf", is_l
         if os.path.exists(file_path):
             os.remove(file_path)
 
-# --- دالة Callback (مع تحديث النص) ---
+# --- دالة Callback ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -369,7 +381,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=query.message.chat_id, text="⚠️ حدث خطأ أثناء معالجة زر التحميل (رابط غير صالح).")
             return
             
-        await query.edit_message_text("⏳ تفعيل استراتيجية الاستخلاص الناري (V15.0 - المقاومة الهندسية)...")
+        await query.edit_message_text("⏳ تفعيل استراتيجية الاستخلاص الناري (V15.3 - البحث الموسع)...")
         
         try:
             pdf_link, title, is_local_path = await get_pdf_link_from_page(link)

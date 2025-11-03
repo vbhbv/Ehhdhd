@@ -1,7 +1,3 @@
-python-telegram-bot==20.8
-aiohttp
-aiofiles
-beautifulsoup4
-ddgs
-playwright
-telethon
+pip install python-telegram-bot==20.8
+pip install telethon
+pip install aiofiles

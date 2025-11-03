@@ -1,3 +1,3 @@
-pip install python-telegram-bot==20.8
-pip install telethon
-pip install aiofiles
+python-telegram-bot==20.8
+telethon
+aiofiles

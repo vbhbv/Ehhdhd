@@ -14,8 +14,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")  # ضع توكن البوت هنا أو كم�
 
 # قناة البحث
 CHANNELS = ["books921383837"]  # معرف القناة فقط
-
-# الحد الأقصى للرسائل لكل قناة
 PER_CHANNEL_LIMIT = 200
 GLOBAL_RESULTS_LIMIT = 12
 
@@ -160,7 +158,7 @@ async def async_main():
     app.add_handler(CommandHandler("search", search_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
     print("البوت جاهز للعمل...")
-    await app.run_polling()
+    await app.run_polling()  # تشغيل آمن بدون تحذيرات
 
 if __name__ == "__main__":
     asyncio.run(async_main())
